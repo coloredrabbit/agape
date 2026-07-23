@@ -1,0 +1,33 @@
+# 리포트 전송 대상 — 여러 개 등록 가능 (`agape report --send`).
+# 비밀정보(Slack webhook URL, SMTP 비밀번호)는 .env에 두고, 여기서는 "어디로 보낼지"만 정의한다.
+#
+# 사용법: 이 파일을 channels.yaml로 복사해 편집 (channels.yaml은 git에 커밋되지 않음).
+#   cp channels.example.yaml channels.yaml
+# 보낼 채널만 enabled: true 로 켜면 된다. 특정 채널만 보내려면 `agape report --send --only me`.
+
+channels:
+  # --- Slack ---
+  # webhook_env가 가리키는 .env 변수의 URL로 전송한다.
+  # 워크스페이스가 여러 개면 .env에 변수를 나눠 두고 채널마다 다른 webhook_env를 지정.
+  - type: slack
+    name: team-slack
+    enabled: false
+    webhook_env: SLACK_WEBHOOK_URL
+    # webhook_url: https://hooks.slack.com/...   # .env 대신 여기 직접 넣어도 됨(비권장)
+
+  # --- Email ---
+  # .env의 SMTP_* 설정으로 발송. to에 수신자를 여러 명 넣을 수 있다.
+  - type: email
+    name: me
+    enabled: false
+    to:
+      - you@example.com
+    # subject: 주간 헤어 트렌드          # 생략 시 자동 제목
+
+  # 여러 이메일 대상 예시 (팀 배포용) — 원하는 만큼 추가
+  - type: email
+    name: team
+    enabled: false
+    to:
+      - lead@example.com
+      - designer@example.com

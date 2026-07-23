@@ -1,0 +1,134 @@
+# agape 트렌드 파이프라인 — 예약 실행 + 리포트 웹 게시(GitHub Pages)
+#
+# 이 워크플로는 agape/를 "독립 레포"로 푸시했을 때 동작한다(파일이 레포 루트의
+# .github/workflows/ 에 위치해야 GitHub이 인식). 자세한 세팅은 README의
+# "GitHub Actions로 무료 자동화" 참고.
+#
+# 공개/비공개 전환:
+#   - 레포 가시성(Settings)을 바꾸면 코드·데이터·Pages가 함께 따라간다.
+#   - 비공개로 가고 Pages를 끄려면 레포 변수 PUBLISH_PAGES=false 만 설정하면 된다
+#     (그래도 collect/report/Slack/이메일은 계속 동작).
+
+name: agape trend pipeline
+
+on:
+  schedule:
+    - cron: "0 22 * * *"     # 매일 07:00 KST — collect (데이터 누적)
+    - cron: "30 22 * * 0"    # 매주 월 07:30 KST — discover + report + Pages
+  workflow_dispatch:          # 수동 실행 버튼(URL로 트리거 가능)
+    inputs:
+      full:
+        description: "discover + report + Pages 까지 실행"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # data/ 커밋백
+  pages: write      # GitHub Pages 배포
+  id-token: write   # Pages 배포(OIDC)
+
+concurrency:
+  group: agape-pipeline
+  cancel-in-progress: false
+
+env:
+  # 시크릿 → agape가 읽는 환경변수. config.py는 os.environ을 .env보다 우선한다.
+  NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+  NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+  YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+  PINTEREST_APP_ID: ${{ secrets.PINTEREST_APP_ID }}
+  PINTEREST_APP_SECRET: ${{ secrets.PINTEREST_APP_SECRET }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  SMTP_HOST: ${{ secrets.SMTP_HOST }}
+  SMTP_PORT: ${{ secrets.SMTP_PORT }}
+  SMTP_USER: ${{ secrets.SMTP_USER }}
+  SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+  SMTP_FROM: ${{ secrets.SMTP_FROM }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    outputs:
+      weekly: ${{ steps.mode.outputs.weekly }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 실행 모드 결정 (weekly?)
+        id: mode
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          EVENT: ${{ github.event_name }}
+          FULL: ${{ inputs.full }}
+        run: |
+          WEEKLY=false
+          [ "$SCHEDULE" = "30 22 * * 0" ] && WEEKLY=true
+          { [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" = "true" ]; } && WEEKLY=true
+          echo "weekly=$WEEKLY" >> "$GITHUB_OUTPUT"
+          echo "실행 모드: weekly=$WEEKLY"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+
+      - name: discover (weekly, 유튜브 영상 풀 갱신)
+        if: steps.mode.outputs.weekly == 'true'
+        run: uv run agape discover
+
+      - name: collect (매일 — 네이버/유튜브/핀터레스트)
+        run: uv run agape collect
+
+      - name: channels.yaml 생성 (레포 변수에서)
+        if: steps.mode.outputs.weekly == 'true'
+        env:
+          CHANNELS_YAML: ${{ vars.CHANNELS_YAML }}
+        run: |
+          if [ -n "$CHANNELS_YAML" ]; then
+            printf '%s\n' "$CHANNELS_YAML" > channels.yaml
+            echo "channels.yaml 생성됨"
+          fi
+
+      - name: report → HTML (weekly)
+        if: steps.mode.outputs.weekly == 'true'
+        run: uv run agape report --quiet --html public/index.html
+
+      - name: report 전송 (weekly, 채널 있을 때만 · 실패는 경고)
+        if: steps.mode.outputs.weekly == 'true'
+        run: |
+          if [ -f channels.yaml ]; then
+            uv run agape report --quiet --send || echo "::warning::리포트 전송 스킵/실패 (채널 설정·SMTP 확인)"
+          else
+            echo "channels.yaml 없음 — 전송 생략 (레포 변수 CHANNELS_YAML 설정 시 활성화)"
+          fi
+
+      - name: data/ 커밋백 (상태 영속화)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data
+          if git diff --cached --quiet; then
+            echo "데이터 변경 없음"
+          else
+            git commit -m "chore(data): 트렌드 스냅샷 업데이트 [skip ci]"
+            git pull --rebase --autostash origin "${{ github.ref_name }}" || true
+            git push
+          fi
+
+      - name: Pages 아티팩트 업로드 (weekly)
+        if: steps.mode.outputs.weekly == 'true' && vars.PUBLISH_PAGES != 'false'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  # 리포트를 GitHub Pages URL로 게시. PUBLISH_PAGES=false 로 끌 수 있다.
+  deploy-pages:
+    needs: run
+    if: needs.run.outputs.weekly == 'true' && vars.PUBLISH_PAGES != 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,114 @@
+# 헤어 트렌드 추적 키워드 사전
+#
+# anchor: 모든 네이버 데이터랩 요청 배치에 끼워 넣는 기준 키워드.
+#   데이터랩 ratio는 "요청 내 최대 검색량 = 100"인 상대값이라 요청(배치) 간 직접 비교가
+#   불가능하므로, 모든 배치에 공통 앵커를 넣고 앵커 평균으로 나눠 스케일을 맞춘다.
+#   앵커는 검색량이 크고 계절 변동이 작은 단어여야 한다.
+anchor: 미용실
+shopping_anchor: 샴푸
+
+# 네이버 쇼핑인사이트 카테고리 (네이버쇼핑 URL의 catId 값)
+shopping_categories:
+  - name: 화장품/미용
+    cat_id: "50000002"
+
+# 네이버 수집 필터 — 검색어트렌드/쇼핑인사이트 일일 수집 전체에 적용된다.
+#   device: "" 전체 | pc | mo(모바일)
+#   gender: "" 전체 | f(여성) | m(남성)
+#   ages: [] 전체 | "10"~"60" 목록 (10대~60대 이상, 예: ["20", "30"])
+# 주의: 필터를 바꾸면 상대값 스케일이 달라져 기존 시계열과 비교할 수 없으므로,
+# 변경 시 자동으로 2년 백필이 다시 실행되고 이전 데이터는 집계에서 제외된다.
+# 저장 없이 즉석으로 조건을 바꿔 보고 싶으면 `agape query`를 사용할 것.
+filters:
+  device: ""
+  gender: ""
+  ages: []
+
+# keywords[<카테고리>][]: name(대표 표기), synonyms(데이터랩 그룹에 함께 묶을 표기 변형),
+#   shopping: true 이면 쇼핑인사이트 키워드 클릭 트렌드도 수집
+keywords:
+  cut:
+    - name: 허쉬컷
+      synonyms: [허쉬 컷]
+    - name: 레이어드컷
+      synonyms: [레이어드 컷]
+    - name: 울프컷
+      synonyms: [울프 컷]
+    - name: 태슬컷
+    - name: 히메컷
+    - name: 샤기컷
+    - name: 보브컷
+      synonyms: [단발보브]
+    - name: 레이어드단발
+      synonyms: [레이어드 단발]
+    - name: 여자숏컷
+      synonyms: [여자 숏컷]
+    - name: 픽시컷
+    - name: 원랭스컷
+      synonyms: [원랭스]
+    - name: 시스루뱅
+      synonyms: [시스루 앞머리]
+    - name: 처피뱅
+    - name: 사이드뱅
+    - name: 풀뱅
+      synonyms: [풀 앞머리]
+
+  perm:
+    - name: 히피펌
+    - name: 빌드펌
+    - name: 애즈펌
+    - name: 쉐도우펌
+    - name: 다운펌
+    - name: 아이롱펌
+    - name: 볼륨매직
+    - name: 셋팅펌
+      synonyms: [세팅펌]
+    - name: 물결펌
+    - name: 버블펌
+    - name: 허쉬펌
+    - name: 레이어드펌
+    - name: 남자펌
+    - name: C컬펌
+      synonyms: [c컬펌]
+    - name: S컬펌
+      synonyms: [s컬펌]
+    - name: 글램펌
+    - name: 바디펌
+    - name: 뿌리펌
+      synonyms: [뿌리볼륨펌]
+
+  color:
+    - name: 애쉬브라운
+      synonyms: [애쉬 브라운]
+    - name: 애쉬그레이
+    - name: 밀크브라운
+    - name: 초코브라운
+    - name: 카키브라운
+    - name: 블루블랙
+    - name: 레드브라운
+    - name: 오렌지브라운
+    - name: 핑크브라운
+    - name: 헤어하이라이트
+      synonyms: [머리 하이라이트, 헤어 하이라이트]
+    - name: 발레아쥬
+    - name: 옴브레염색
+      synonyms: [옴브레]
+    - name: 새치염색
+    - name: 탈색
+
+  care:
+    - name: 두피케어
+    - name: 헤드스파
+    - name: 헤어클리닉
+    - name: 헤어에센스
+      shopping: true
+    - name: 헤어오일
+      shopping: true
+    - name: 트리트먼트
+      shopping: true
+    - name: 헤어세럼
+      shopping: true
+    - name: 드라이샴푸
+      shopping: true
+    - name: 헤어미스트
+      shopping: true

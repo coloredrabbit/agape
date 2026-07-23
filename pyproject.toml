@@ -1,0 +1,27 @@
+[project]
+name = "agape"
+version = "0.1.0"
+description = "SNS 기반 헤어 트렌드 감지 파이프라인 (저비용 MVP)"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "duckdb>=1.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+agape = "agape.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# src/ 아래 평탄 레이아웃을 import 패키지명 agape로 매핑
+# (hatchling은 이 prefix 매핑을 editable 설치에서 지원하지 않아 setuptools 사용)
+[tool.setuptools]
+packages = ["agape", "agape.collectors"]
+
+[tool.setuptools.package-dir]
+agape = "src"
+"agape.collectors" = "src/collectors"
