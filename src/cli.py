@@ -14,24 +14,33 @@ def cmd_collect(_: argparse.Namespace) -> int:
     from .collectors import naver, pinterest, pinterest_official, youtube
 
     cfg = load_keyword_config()
-    failed = []
-    for name, fn in [
+    sources = [
         ("naver_search", lambda: naver.collect_search_trend(cfg)),
         ("naver_shopping", lambda: naver.collect_shopping(cfg)),
         ("youtube_snapshot", youtube.snapshot),
         ("youtube_trending", youtube.trending),
         ("pinterest", lambda: pinterest.collect(cfg)),
         ("pinterest_official", pinterest_official.collect),
-    ]:
+    ]
+    skipped, errored = [], []
+    for name, fn in sources:
         try:
             fn()
         except SystemExit as e:
+            # 키 미설정 등 의도된 생략 — 선택 소스가 있으므로 실패로 치지 않는다
             print(f"[{name}] SKIP: {e}", file=sys.stderr)
-            failed.append(name)
+            skipped.append(name)
         except Exception as e:  # noqa: BLE001 — 한 소스 실패가 나머지 수집을 막지 않게
             print(f"[{name}] ERROR: {e}", file=sys.stderr)
-            failed.append(name)
-    return 1 if failed else 0
+            errored.append(name)
+    ok = len(sources) - len(skipped) - len(errored)
+    print(f"[collect] 성공 {ok} · 스킵 {len(skipped)} · 실패 {len(errored)}")
+    if errored:
+        return 1
+    if ok == 0:
+        print("[collect] 수집된 소스가 하나도 없습니다 — 키 설정을 확인하세요", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_discover(_: argparse.Namespace) -> int:

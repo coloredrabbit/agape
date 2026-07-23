@@ -28,8 +28,9 @@ DuckDB 집계 → 리포트(Slack/이메일/GitHub Pages)가 전부다.
    `naver_filters_tag`). 태그 없이 행을 쓰거나 태그 무시 집계를 추가하지 말 것.
 3. **저장은 멱등**: (keyword, date) 중복은 `fetched_at` 최신본으로 dedupe. 스키마가 변한
    과거 파일과의 호환을 위해 DuckDB는 `read_ndjson_auto(..., union_by_name=true)`로 읽는다.
-4. **수집기는 소스별 독립 실행** (`cli.cmd_collect`): 한 소스의 실패/키 부재는 SKIP 출력 후
-   다음으로 넘어간다. 새 수집기도 이 루프에 넣고, 실패가 전파되지 않게 한다.
+4. **수집기는 소스별 독립 실행** (`cli.cmd_collect`): 키 부재(SystemExit)는 SKIP으로 exit 0
+   (선택 소스가 있으므로 — CI에서 미등록 시크릿이 정상 케이스), 예기치 못한 예외는 ERROR로
+   exit 1, 전부 스킵이면 exit 1. 새 수집기도 이 루프에 넣고, 키 검증은 SystemExit으로 던진다.
 5. **유튜브 쿼터 경제학**: `search.list`=100유닛(비쌈)이라 discover에서 주 1회 키워드 순환만.
    시계열은 `videos.list`(1유닛/50개) 일일 스냅샷의 차분(Δviews)으로 직접 만든다 —
    유튜브는 과거 조회수를 주지 않는다.
