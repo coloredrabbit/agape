@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-DATA_DIR = Path(os.environ.get("AGAPE_DATA_DIR", str(PROJECT_ROOT / "data")))
+DATA_DIR = Path(os.environ.get("AGAPE_DATA_DIR") or str(PROJECT_ROOT / "data"))
 RAW_DIR = DATA_DIR / "raw"
 STATE_DIR = DATA_DIR / "state"
 
@@ -21,12 +21,13 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 # 이메일 발송용 SMTP (비밀정보 — .env). 수신자는 channels.yaml에서 지정한다.
+# CI에서는 미등록 시크릿이 빈 문자열로 주입되므로 "키 없음"과 "빈 값"을 동일하게 취급한다.
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_PORT = int(os.environ.get("SMTP_PORT") or "587")
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
-SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "true").lower() != "false"
+SMTP_STARTTLS = (os.environ.get("SMTP_STARTTLS") or "true").lower() != "false"
 
 # 네이버 데이터랩: 요청당 키워드 그룹 최대 5개 → 앵커 1 + 추적 키워드 4
 NAVER_GROUPS_PER_REQUEST = 4
@@ -54,8 +55,8 @@ PINTEREST_CRAWLER_UA = os.environ.get("PINTEREST_CRAWLER_UA", "").strip() or CRA
 # 단, Trends 데이터 접근은 Pinterest 파트너/승인이 필요할 수 있어 미승인 시 403이 난다.
 PINTEREST_APP_ID = os.environ.get("PINTEREST_APP_ID", "")
 PINTEREST_APP_SECRET = os.environ.get("PINTEREST_APP_SECRET", "")
-PINTEREST_OFFICIAL_REGION = os.environ.get("PINTEREST_OFFICIAL_REGION", "US")
-PINTEREST_OFFICIAL_INTEREST = os.environ.get("PINTEREST_OFFICIAL_INTEREST", "beauty")
+PINTEREST_OFFICIAL_REGION = os.environ.get("PINTEREST_OFFICIAL_REGION") or "US"
+PINTEREST_OFFICIAL_INTEREST = os.environ.get("PINTEREST_OFFICIAL_INTEREST") or "beauty"
 
 # YouTube: search.list는 100유닛/회라 주 1회 discovery에서만 사용
 YOUTUBE_DISCOVERY_MAX_SEARCHES = 10
