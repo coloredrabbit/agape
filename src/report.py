@@ -18,9 +18,12 @@ from .config import (
     SMTP_USER,
     Channel,
 )
-from .metrics import KeywordMetrics
+from .metrics import HISTORY_WEEKS, KeywordMetrics
 
 TOP_N = 15
+MOVERS_N = 10       # "네이버 상승 톱" 표 행 수
+CHARTS_N = 6        # HTML 리포트에 넣을 추이 차트 수
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
 def _fmt_pct(v: float | None) -> str:
@@ -35,27 +38,101 @@ def _fmt_int(v: int | None) -> str:
     return f"{v:,}" if v is not None else "-"
 
 
+def _sparkline(points: list[dict[str, Any]]) -> str:
+    """주간 시계열을 유니코드 블록 문자로 압축한 미니 추이.
+
+    텍스트라서 터미널·Slack·이메일 어디서든 그대로 보인다. 값이 2개 미만이면 "-".
+    """
+    values = [p["vol"] for p in points if p.get("vol") is not None]
+    if len(values) < 2:
+        return "-"
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-12:
+        return SPARK_CHARS[3] * len(values)
+    span = hi - lo
+    return "".join(SPARK_CHARS[min(7, int((v - lo) / span * 8))] for v in values)
+
+
+def _signal_summary(metrics: list[KeywordMetrics]) -> str:
+    """리포트 최상단 한 줄 요약 — 시그널 분포, 등락 폭, 소스별 커버리지."""
+    counts = {"강한 후보": 0, "관찰": 0, "계절성 의심": 0}
+    for m in metrics:
+        if m.signal:
+            counts[m.signal] += 1
+    ups = sum(1 for m in metrics if m.naver_velocity is not None and m.naver_velocity > 0)
+    downs = sum(1 for m in metrics if m.naver_velocity is not None and m.naver_velocity < 0)
+    naver_n = sum(1 for m in metrics if m.naver_vol is not None)
+    yt_n = sum(1 for m in metrics if m.yt_views is not None)
+    pin_n = sum(1 for m in metrics if m.pin_mom is not None)
+    sig = " · ".join(f"{name} {n}" for name, n in counts.items())
+    return (
+        f"**시그널** {sig}  |  **네이버 WoW** ↑{ups} ↓{downs}  |  "
+        f"**커버리지** 네이버 {naver_n} · 유튜브 {yt_n} · 핀터레스트 {pin_n} (추적 {len(metrics)}개)"
+    )
+
+
 def render_markdown(result: dict[str, Any]) -> str:
     week = result["week"]
     metrics: list[KeywordMetrics] = result["metrics"]
+    history: dict[str, list[dict[str, Any]]] = result.get("history") or {}
     lines = [f"# 헤어 트렌드 주간 리포트 — {week.isoformat()} 주"]
+
+    lines.append("")
+    lines.append(_signal_summary(metrics))
 
     flagged = [m for m in metrics if m.signal][:TOP_N]
     if flagged:
         lines.append("")
         lines.append(
-            "| 시그널 | 키워드 | 네이버 z | 네이버 WoW | 전년비 | 유튜브 Δ뷰 | 유튜브 WoW | 핀 MoM |"
+            "| 시그널 | 키워드 | 네이버 z | 네이버 WoW | 전년비 | 유튜브 Δ뷰 | 유튜브 WoW | 핀 MoM | 추이 |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for m in flagged:
             lines.append(
                 f"| {m.signal} | {m.keyword} | {_fmt_num(m.naver_z)} | {_fmt_pct(m.naver_velocity)} "
                 f"| {_fmt_pct(m.naver_yoy)} | {_fmt_int(m.yt_views)} | {_fmt_pct(m.yt_velocity)} "
-                f"| {_fmt_pct(m.pin_mom)} |"
+                f"| {_fmt_pct(m.pin_mom)} | {_sparkline(history.get(m.keyword, []))} |"
             )
     else:
         lines.append("")
         lines.append("이번 주 급등 시그널 없음.")
+
+    movers = sorted(
+        (m for m in metrics if m.naver_velocity is not None),
+        key=lambda m: m.naver_velocity,
+        reverse=True,
+    )[:MOVERS_N]
+    if movers:
+        lines.append("")
+        lines.append(f"**네이버 검색 상승 톱 {len(movers)}**")
+        lines.append("")
+        lines.append("| 키워드 | 카테고리 | WoW | z | 시그널 | 추이 |")
+        lines.append("|---|---|---|---|---|---|")
+        for m in movers:
+            lines.append(
+                f"| {m.keyword} | {m.category or '-'} | {_fmt_pct(m.naver_velocity)} "
+                f"| {_fmt_num(m.naver_z)} | {m.signal or '-'} | {_sparkline(history.get(m.keyword, []))} |"
+            )
+
+    by_cat: dict[str, list[KeywordMetrics]] = {}
+    for m in metrics:
+        if m.category and m.naver_velocity is not None:
+            by_cat.setdefault(m.category, []).append(m)
+    if by_cat:
+        lines.append("")
+        lines.append("**카테고리 동향 (네이버 WoW)**")
+        lines.append("")
+        lines.append("| 카테고리 | 키워드 수 | 평균 WoW | 상승/하락 | 최고 상승 |")
+        lines.append("|---|---|---|---|---|")
+        cat_avg = lambda ms: sum(m.naver_velocity for m in ms) / len(ms)  # noqa: E731
+        for cat, ms in sorted(by_cat.items(), key=lambda kv: -cat_avg(kv[1])):
+            ups = sum(1 for m in ms if m.naver_velocity > 0)
+            downs = sum(1 for m in ms if m.naver_velocity < 0)
+            top = max(ms, key=lambda m: m.naver_velocity)
+            lines.append(
+                f"| {cat} | {len(ms)} | {_fmt_pct(cat_avg(ms))} | {ups}↑ {downs}↓ "
+                f"| {top.keyword} ({_fmt_pct(top.naver_velocity)}) |"
+            )
 
     if result.get("pinterest_candidates"):
         lines.append("")
@@ -73,11 +150,13 @@ def render_markdown(result: dict[str, Any]) -> str:
             g = t["pct_growth_mom"]
             lines.append(f"- {t['title']} (MoM {f'{g:+.0f}%' if g is not None else '-'})")
 
-    if result.get("shopping"):
+    if result.get("shopping") or result.get("shopping_keywords"):
         lines.append("")
-        lines.append("**쇼핑 클릭 (카테고리)**")
-        for s in result["shopping"]:
-            lines.append(f"- {s['category']}: WoW {_fmt_pct(s['velocity'])}")
+        lines.append("**쇼핑 클릭 (네이버 쇼핑인사이트)**")
+        for s in result.get("shopping", []):
+            lines.append(f"- [카테고리] {s['category']}: WoW {_fmt_pct(s['velocity'])}")
+        for s in result.get("shopping_keywords", [])[:8]:
+            lines.append(f"- [제품] {s['keyword']}: WoW {_fmt_pct(s['velocity'])}")
 
     if result.get("trending"):
         lines.append("")
@@ -86,8 +165,10 @@ def render_markdown(result: dict[str, Any]) -> str:
             lines.append(f"- #{t['rank']} {t['title']} ({t['channel']}, {_fmt_int(t['views'])}뷰)")
 
     lines.append("")
-    covered = sum(1 for m in metrics if m.naver_vol is not None)
-    lines.append(f"_추적 키워드 {len(metrics)}개 중 네이버 데이터 확보 {covered}개_")
+    lines.append(
+        "_z: 4주 이동평균 대비 편차(표준편차 단위) · WoW: 전주 대비 · 전년비: 전년 동기 대비 · "
+        f"추이: 최근 {HISTORY_WEEKS}주 네이버 검색(앵커 보정) 스파크라인_"
+    )
     return "\n".join(lines)
 
 
@@ -161,25 +242,98 @@ body { max-width: 860px; margin: 2rem auto; padding: 0 1rem;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   line-height: 1.6; }
 h2 { border-bottom: 2px solid #8883; padding-bottom: .3rem; }
-table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 14px;
-  display: block; overflow-x: auto; }
-th, td { border: 1px solid #8884; padding: 6px 10px; text-align: left; white-space: nowrap; }
-th { background: #8882; }
+table { border-collapse: collapse; margin: 1rem 0; font-size: 14px;
+  display: block; overflow-x: auto; width: fit-content; max-width: 100%; }
+/* markdown_to_html이 이메일용 인라인 스타일(밝은 배경 등)을 넣으므로,
+   웹 문서(다크모드 포함)에서는 !important로 페이지 스타일이 이기게 한다 */
+th, td { border: 1px solid #8884 !important; padding: 6px 10px; text-align: left;
+  white-space: nowrap; }
+th { background: #8882 !important; }
 ul { padding-left: 1.2rem; }
 footer { margin-top: 2rem; color: #8889; font-size: 12px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px; margin: 1rem 0; }
+.charts svg { width: 100%; height: auto; background: #8881; border-radius: 8px; }
 """
 
 
-def html_document(markdown_text: str, title: str, generated_at: str = "") -> str:
-    """웹페이지용 완결 HTML 문서. 마크다운 리포트를 감싼다 (GitHub Pages 게시용)."""
+def _esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _svg_line_chart(
+    name: str, sub: str, points: list[dict[str, Any]], width: int = 280, height: int = 100
+) -> str:
+    """의존성 없이 손으로 그리는 미니 라인 차트 (웹 HTML 전용). 값 2개 미만이면 빈 문자열."""
+    pts = [(p["week"], p["vol"]) for p in points if p.get("vol") is not None]
+    if len(pts) < 2:
+        return ""
+    values = [v for _, v in pts]
+    lo, hi = min(values), max(values)
+    pad_l, pad_r, pad_t, pad_b = 10, 10, 26, 18
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+    n = len(values)
+    xs = [pad_l + pw * i / (n - 1) for i in range(n)]
+    if hi - lo < 1e-12:
+        ys = [pad_t + ph / 2.0] * n
+    else:
+        ys = [pad_t + ph * (1 - (v - lo) / (hi - lo)) for v in values]
+    poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    first, last = pts[0][0].isoformat(), pts[-1][0].isoformat()
+    return (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="{_esc(name)} 주간 추이">'
+        f'<text x="{pad_l}" y="16" font-size="13" font-weight="600" fill="currentColor">{_esc(name)}</text>'
+        f'<text x="{width - pad_r}" y="16" font-size="11" text-anchor="end" fill="currentColor" opacity="0.6">{_esc(sub)}</text>'
+        f'<line x1="{pad_l}" y1="{pad_t + ph}" x2="{pad_l + pw}" y2="{pad_t + ph}" stroke="currentColor" opacity="0.15"/>'
+        f'<polyline points="{poly}" fill="none" stroke="#5b8def" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{xs[-1]:.1f}" cy="{ys[-1]:.1f}" r="3" fill="#5b8def"/>'
+        f'<text x="{pad_l}" y="{height - 4}" font-size="10" fill="currentColor" opacity="0.5">{first}</text>'
+        f'<text x="{width - pad_r}" y="{height - 4}" font-size="10" text-anchor="end" '
+        f'fill="currentColor" opacity="0.5">{last}</text>'
+        f"</svg>"
+    )
+
+
+def _charts_html(result: dict[str, Any]) -> str:
+    """추이 차트 묶음 — metrics 정렬(시그널 우선, z 내림차순)대로 최대 CHARTS_N개."""
+    metrics: list[KeywordMetrics] = result.get("metrics") or []
+    history = result.get("history") or {}
+    charts: list[str] = []
+    for m in metrics:
+        svg = _svg_line_chart(
+            m.keyword, f"WoW {_fmt_pct(m.naver_velocity)}", history.get(m.keyword, [])
+        )
+        if svg:
+            charts.append(svg)
+        if len(charts) >= CHARTS_N:
+            break
+    if not charts:
+        return ""
+    return (
+        f"<h3>주간 추이 — 네이버 검색 (앵커 보정, 최근 {HISTORY_WEEKS}주)</h3>"
+        '<div class="charts">' + "".join(charts) + "</div>"
+    )
+
+
+def html_document(
+    markdown_text: str, title: str, generated_at: str = "", result: dict[str, Any] | None = None
+) -> str:
+    """웹페이지용 완결 HTML 문서 (GitHub Pages 게시용).
+
+    result를 주면 마크다운 본문 뒤에 SVG 추이 차트를 덧붙인다 — 이메일 클라이언트는
+    SVG 지원이 불안정하므로(Gmail은 제거함) 차트는 웹 문서에만 넣는다.
+    """
     body = markdown_to_html(markdown_text)
+    charts = _charts_html(result) if result else ""
     foot = f"<footer>생성 시각: {generated_at}</footer>" if generated_at else ""
     return (
         "<!doctype html>\n"
         '<html lang="ko"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{title}</title>\n<style>{_PAGE_STYLE}</style>\n"
-        f"</head><body>\n{body}\n{foot}\n</body></html>\n"
+        f"</head><body>\n{body}\n{charts}\n{foot}\n</body></html>\n"
     )
 
 

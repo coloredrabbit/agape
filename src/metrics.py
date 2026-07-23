@@ -27,6 +27,7 @@ HAIR_TERMS = [
 @dataclass
 class KeywordMetrics:
     keyword: str
+    category: str = ""
     naver_vol: float | None = None
     naver_velocity: float | None = None
     naver_z: float | None = None
@@ -107,6 +108,45 @@ def _naver_weekly(
     return {
         r[0]: {"vol": r[1], "velocity": r[2], "z": r[3], "yoy": r[4]} for r in rows
     }
+
+
+HISTORY_WEEKS = 13  # 스파크라인/차트에 보여줄 최근 주 수
+
+
+def _naver_history(
+    con: duckdb.DuckDBPyConnection, week: date, filters_tag: str, weeks: int = HISTORY_WEEKS
+) -> dict[str, list[dict[str, Any]]]:
+    """키워드별 최근 N주 주간 시계열 (리포트의 스파크라인·차트용).
+
+    리포트 기준 주(직전 완결 주)까지만 포함한다 — 진행 중인 주를 넣으면
+    부분 데이터가 추이 끝점을 왜곡한다.
+    """
+    if not storage.has_data("naver_search"):
+        return {}
+    start = week - timedelta(weeks=weeks - 1)
+    rows = con.execute(
+        """
+        WITH raw AS (
+            SELECT keyword, CAST(date AS DATE) AS d, ratio_adj,
+                   ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
+            FROM read_ndjson_auto(?, union_by_name=true)
+            WHERE ratio_adj IS NOT NULL AND coalesce(filters, 'all') = ?
+        ),
+        weekly AS (
+            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(ratio_adj) AS vol
+            FROM raw WHERE rn = 1
+            GROUP BY 1, 2
+        )
+        SELECT keyword, week, vol FROM weekly
+        WHERE week BETWEEN ? AND ?
+        ORDER BY keyword, week
+        """,
+        [storage.source_glob("naver_search"), filters_tag, start, week],
+    ).fetchall()
+    history: dict[str, list[dict[str, Any]]] = {}
+    for kw, wk, vol in rows:
+        history.setdefault(kw, []).append({"week": wk, "vol": vol})
+    return history
 
 
 def _youtube_weekly(con: duckdb.DuckDBPyConnection, week: date) -> dict[str, dict[str, Any]]:
@@ -239,6 +279,39 @@ def shopping_category_summary(
     return [{"category": r[0], "vol": r[1], "velocity": r[2]} for r in rows]
 
 
+def shopping_keyword_summary(
+    con: duckdb.DuckDBPyConnection, week: date, filters_tag: str
+) -> list[dict[str, Any]]:
+    """shopping=true 키워드의 클릭 트렌드 WoW (앵커 보정값 기준, kind='keyword' 행)."""
+    if not storage.has_data("naver_shopping"):
+        return []
+    rows = con.execute(
+        """
+        WITH raw AS (
+            SELECT keyword, CAST(date AS DATE) AS d, ratio_adj,
+                   ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
+            FROM read_ndjson_auto(?, union_by_name=true)
+            WHERE kind = 'keyword' AND ratio_adj IS NOT NULL AND coalesce(filters, 'all') = ?
+        ),
+        weekly AS (
+            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(ratio_adj) AS vol
+            FROM raw WHERE rn = 1
+            GROUP BY 1, 2
+        ),
+        w AS (
+            SELECT keyword, week, vol,
+                   lag(vol) OVER (PARTITION BY keyword ORDER BY week) AS prev_vol
+            FROM weekly
+        )
+        SELECT keyword, vol, (vol - prev_vol) / nullif(prev_vol, 0) AS velocity
+        FROM w WHERE week = ?
+        ORDER BY velocity DESC NULLS LAST
+        """,
+        [storage.source_glob("naver_shopping"), filters_tag, week],
+    ).fetchall()
+    return [{"keyword": r[0], "vol": r[1], "velocity": r[2]} for r in rows]
+
+
 def latest_trending_hair(con: duckdb.DuckDBPyConnection, keyword_names: list[str]) -> list[dict[str, Any]]:
     """최신 인기 급상승 차트에서 헤어 관련 제목만 추린다."""
     if not storage.has_data("youtube_trending"):
@@ -261,9 +334,13 @@ def latest_trending_hair(con: duckdb.DuckDBPyConnection, keyword_names: list[str
 
 
 def compute(
-    keyword_names: list[str], week: date | None = None, filters_tag: str = "all"
+    keyword_names: list[str],
+    week: date | None = None,
+    filters_tag: str = "all",
+    categories: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     week = week or last_complete_week()
+    categories = categories or {}
     con = duckdb.connect()
     naver = _naver_weekly(con, week, filters_tag)
     youtube = _youtube_weekly(con, week)
@@ -277,6 +354,7 @@ def compute(
         metrics.append(
             KeywordMetrics(
                 keyword=name,
+                category=categories.get(name, ""),
                 naver_vol=n.get("vol"),
                 naver_velocity=n.get("velocity"),
                 naver_z=n.get("z"),
@@ -292,7 +370,9 @@ def compute(
     return {
         "week": week,
         "metrics": metrics,
+        "history": _naver_history(con, week, filters_tag),
         "shopping": shopping_category_summary(con, week, filters_tag),
+        "shopping_keywords": shopping_keyword_summary(con, week, filters_tag),
         "trending": latest_trending_hair(con, keyword_names),
         "pinterest_candidates": pinterest_new_candidates(con),
         "pinterest_official": pinterest_official_topics(con),

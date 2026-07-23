@@ -53,7 +53,11 @@ def cmd_discover(_: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     cfg = load_keyword_config()
-    result = metrics_mod.compute([k.name for k in cfg.keywords], filters_tag=cfg.filters.tag)
+    result = metrics_mod.compute(
+        [k.name for k in cfg.keywords],
+        filters_tag=cfg.filters.tag,
+        categories={k.name: k.category for k in cfg.keywords},
+    )
     text = report_mod.render_markdown(result)
     if not args.quiet:
         print(text)
@@ -62,7 +66,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         gen = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
         title = f"헤어 트렌드 리포트 — {result['week']} 주"
-        path.write_text(report_mod.html_document(text, title, gen), encoding="utf-8")
+        path.write_text(report_mod.html_document(text, title, gen, result), encoding="utf-8")
         print(f"[html] {path} 작성")
     if args.send:
         channels = load_channels_config()
