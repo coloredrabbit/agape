@@ -333,6 +333,54 @@ def latest_trending_hair(con: duckdb.DuckDBPyConnection, keyword_names: list[str
     return hits
 
 
+def top_youtube_last_7d(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
+    """최근 7일간 조회수가 가장 많이 늘어난(Δ뷰 최대) 추적 영상 1개.
+
+    절대 조회수가 아니라 '최근 7일 증가분'을 기준으로 한다 — 파이프라인 전체가
+    절대량이 아닌 모멘텀을 보는 것과 같은 원칙이고, 오래전 떡상한 영상이 아니라
+    '이번 주에 뜬 영상'을 고른다. 창은 최신 스냅샷일 기준 직전 7일.
+    제목/채널은 스냅샷에 없으므로 영상 풀 상태에서 조회한다(없으면 None).
+    """
+    if not storage.has_data("youtube_stats"):
+        return None
+    row = con.execute(
+        """
+        WITH raw AS (
+            SELECT video_id, CAST(date AS DATE) AS d, view_count,
+                   ROW_NUMBER() OVER (PARTITION BY video_id, date ORDER BY fetched_at DESC) AS rn
+            FROM read_ndjson_auto(?)
+        ),
+        dedup AS (SELECT video_id, d, view_count FROM raw WHERE rn = 1),
+        win AS (
+            SELECT video_id, d, view_count FROM dedup
+            WHERE d >= CAST((SELECT max(d) FROM dedup) - INTERVAL '6 days' AS DATE)
+        )
+        SELECT video_id,
+               arg_max(view_count, d) - arg_min(view_count, d) AS dviews,
+               arg_max(view_count, d) AS latest_views,
+               count(DISTINCT d) AS days
+        FROM win
+        GROUP BY video_id
+        HAVING count(DISTINCT d) >= 2 AND arg_max(view_count, d) - arg_min(view_count, d) > 0
+        ORDER BY dviews DESC
+        LIMIT 1
+        """,
+        [storage.source_glob("youtube_stats")],
+    ).fetchone()
+    if not row:
+        return None
+    video_id, dviews, latest_views, days = row
+    meta = storage.load_state("youtube_video_pool", {}).get(video_id, {})
+    return {
+        "video_id": video_id,
+        "title": meta.get("title"),
+        "channel": meta.get("channel"),
+        "dviews": int(dviews) if dviews is not None else None,
+        "views": int(latest_views) if latest_views is not None else None,
+        "days": int(days),
+    }
+
+
 def compute(
     keyword_names: list[str],
     week: date | None = None,
@@ -374,6 +422,7 @@ def compute(
         "shopping": shopping_category_summary(con, week, filters_tag),
         "shopping_keywords": shopping_keyword_summary(con, week, filters_tag),
         "trending": latest_trending_hair(con, keyword_names),
+        "youtube_top": top_youtube_last_7d(con),
         "pinterest_candidates": pinterest_new_candidates(con),
         "pinterest_official": pinterest_official_topics(con),
     }

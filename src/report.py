@@ -38,6 +38,15 @@ def _fmt_int(v: int | None) -> str:
     return f"{v:,}" if v is not None else "-"
 
 
+# 유튜브 video_id는 정확히 11자 [A-Za-z0-9_-]. 임베드/링크 URL에 넣기 전 반드시 검증한다.
+# (외부에서 온 값이라 신뢰하지 않는다 — 검증 실패 시 임베드/링크를 생략한다.)
+_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _valid_youtube_id(vid: str | None) -> bool:
+    return bool(vid and _YOUTUBE_ID_RE.match(vid))
+
+
 def _sparkline(points: list[dict[str, Any]]) -> str:
     """주간 시계열을 유니코드 블록 문자로 압축한 미니 추이.
 
@@ -158,6 +167,19 @@ def render_markdown(result: dict[str, Any]) -> str:
         for s in result.get("shopping_keywords", [])[:8]:
             lines.append(f"- [제품] {s['keyword']}: WoW {_fmt_pct(s['velocity'])}")
 
+    top = result.get("youtube_top")
+    if top and _valid_youtube_id(top.get("video_id")):
+        # 텍스트 리포트(터미널/Slack/이메일)에는 iframe 대신 안전한 링크만.
+        # URL은 검증된 id로 직접 조립한다. 제목은 평문(HTML 변환 시 이스케이프됨).
+        url = f"https://www.youtube.com/watch?v={top['video_id']}"
+        title = top.get("title") or "YouTube 동영상"
+        channel = top.get("channel") or ""
+        dv = top.get("dviews")
+        extra = f", 최근 7일 +{dv:,}뷰" if dv is not None else ""
+        lines.append("")
+        lines.append("**🔥 이번 주 최고 조회 영상 (유튜브 · 최근 7일 조회수 증가 1위)**")
+        lines.append(f"- {title} ({channel}{extra}) — {url}")
+
     if result.get("trending"):
         lines.append("")
         lines.append("**유튜브 인기 급상승 중 헤어 관련**")
@@ -254,6 +276,10 @@ footer { margin-top: 2rem; color: #8889; font-size: 12px; }
 .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 12px; margin: 1rem 0; }
 .charts svg { width: 100%; height: auto; background: #8881; border-radius: 8px; }
+.video { margin: 1.2rem 0; }
+.video iframe { width: 100%; max-width: 640px; aspect-ratio: 16 / 9; height: auto;
+  border: 0; border-radius: 8px; display: block; }
+.video .cap { font-size: 13px; opacity: .75; margin: .4rem 0 0; }
 """
 
 
@@ -317,15 +343,54 @@ def _charts_html(result: dict[str, Any]) -> str:
     )
 
 
+def _youtube_embed_html(top: dict[str, Any] | None) -> str:
+    """최근 7일 Δ뷰 최대 영상을 공식 임베드 플레이어로 삽입 (HTML 문서 전용).
+
+    법적: 공식 임베드 플레이어만 사용한다(다운로드·재호스팅 없음). 제목은 watch
+    페이지로 링크해 출처를 표기한다. 이메일/Slack에는 넣지 않는다 — 클라이언트가
+    iframe을 제거하거나 지원하지 않으므로 거기서는 render_markdown의 링크로 대체한다.
+
+    보안: video_id를 11자 [A-Za-z0-9_-]로 검증한 뒤에만 사용하고(실패 시 생략), src는
+    검증된 id로 우리가 직접 조립한다 — 외부 URL을 그대로 넣지 않으므로 스킴/속성 인젝션
+    여지가 없다. 캡션(제목·채널)은 요소 본문에만 넣고 _esc로 이스케이프한다(속성에 신뢰
+    불가 문자열을 두지 않는다). 추적을 줄이기 위해 youtube-nocookie 도메인 + referrerpolicy를
+    쓴다(방문자 IP가 유튜브에 닿는 것은 임베드의 본질적 특성이라 완전히 없앨 수는 없다).
+    """
+    if not top or not _valid_youtube_id(top.get("video_id")):
+        return ""
+    vid = top["video_id"]
+    src = f"https://www.youtube-nocookie.com/embed/{vid}"
+    watch = f"https://www.youtube.com/watch?v={vid}"
+    title = _esc(top.get("title") or "YouTube 동영상")
+    parts = []
+    if top.get("channel"):
+        parts.append(_esc(top["channel"]))
+    if top.get("dviews") is not None:
+        parts.append(f"최근 7일 +{top['dviews']:,}뷰")
+    sub = (" · " + " · ".join(parts)) if parts else ""
+    return (
+        "<h3>🔥 이번 주 최고 조회 영상 (최근 7일 조회수 증가 1위)</h3>"
+        '<div class="video">'
+        f'<iframe src="{src}" title="YouTube 동영상 플레이어" loading="lazy" '
+        'referrerpolicy="strict-origin-when-cross-origin" '
+        'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; '
+        'picture-in-picture; web-share" allowfullscreen></iframe>'
+        f'<p class="cap"><a href="{watch}" target="_blank" '
+        f'rel="noopener noreferrer nofollow">{title}</a>{sub}</p>'
+        "</div>"
+    )
+
+
 def html_document(
     markdown_text: str, title: str, generated_at: str = "", result: dict[str, Any] | None = None
 ) -> str:
     """웹페이지용 완결 HTML 문서 (GitHub Pages 게시용).
 
-    result를 주면 마크다운 본문 뒤에 SVG 추이 차트를 덧붙인다 — 이메일 클라이언트는
-    SVG 지원이 불안정하므로(Gmail은 제거함) 차트는 웹 문서에만 넣는다.
+    result를 주면 마크다운 본문 뒤에 최고 조회 영상 임베드 + SVG 추이 차트를 덧붙인다 —
+    iframe·SVG는 이메일 클라이언트 지원이 불안정하므로(Gmail은 제거함) 웹 문서에만 넣는다.
     """
     body = markdown_to_html(markdown_text)
+    embed = _youtube_embed_html(result.get("youtube_top")) if result else ""
     charts = _charts_html(result) if result else ""
     foot = f"<footer>생성 시각: {generated_at}</footer>" if generated_at else ""
     return (
@@ -333,7 +398,7 @@ def html_document(
         '<html lang="ko"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{title}</title>\n<style>{_PAGE_STYLE}</style>\n"
-        f"</head><body>\n{body}\n{charts}\n{foot}\n</body></html>\n"
+        f"</head><body>\n{body}\n{embed}\n{charts}\n{foot}\n</body></html>\n"
     )
 
 
