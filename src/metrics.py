@@ -333,17 +333,22 @@ def latest_trending_hair(con: duckdb.DuckDBPyConnection, keyword_names: list[str
     return hits
 
 
-def top_youtube_last_7d(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
-    """최근 7일간 조회수가 가장 많이 늘어난(Δ뷰 최대) 추적 영상 1개.
+YOUTUBE_TOP_N = 10  # 리포트에 임베드할 급상승 영상 수
+
+
+def top_youtube_last_7d(
+    con: duckdb.DuckDBPyConnection, limit: int = YOUTUBE_TOP_N
+) -> list[dict[str, Any]]:
+    """최근 7일간 조회수가 가장 많이 늘어난(Δ뷰) 추적 영상 톱 N.
 
     절대 조회수가 아니라 '최근 7일 증가분'을 기준으로 한다 — 파이프라인 전체가
     절대량이 아닌 모멘텀을 보는 것과 같은 원칙이고, 오래전 떡상한 영상이 아니라
     '이번 주에 뜬 영상'을 고른다. 창은 최신 스냅샷일 기준 직전 7일.
-    제목/채널은 스냅샷에 없으므로 영상 풀 상태에서 조회한다(없으면 None).
+    제목/채널/키워드는 스냅샷에 없으므로 영상 풀 상태에서 조회한다.
     """
     if not storage.has_data("youtube_stats"):
-        return None
-    row = con.execute(
+        return []
+    rows = con.execute(
         """
         WITH raw AS (
             SELECT video_id, CAST(date AS DATE) AS d, view_count,
@@ -363,22 +368,28 @@ def top_youtube_last_7d(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None
         GROUP BY video_id
         HAVING count(DISTINCT d) >= 2 AND arg_max(view_count, d) - arg_min(view_count, d) > 0
         ORDER BY dviews DESC
-        LIMIT 1
+        LIMIT ?
         """,
-        [storage.source_glob("youtube_stats")],
-    ).fetchone()
-    if not row:
-        return None
-    video_id, dviews, latest_views, days = row
-    meta = storage.load_state("youtube_video_pool", {}).get(video_id, {})
-    return {
-        "video_id": video_id,
-        "title": meta.get("title"),
-        "channel": meta.get("channel"),
-        "dviews": int(dviews) if dviews is not None else None,
-        "views": int(latest_views) if latest_views is not None else None,
-        "days": int(days),
-    }
+        [storage.source_glob("youtube_stats"), int(limit)],
+    ).fetchall()
+    pool = storage.load_state("youtube_video_pool", {})
+    out: list[dict[str, Any]] = []
+    for rank, (video_id, dviews, latest_views, days) in enumerate(rows, start=1):
+        meta = pool.get(video_id, {})
+        out.append(
+            {
+                "rank": rank,
+                "video_id": video_id,
+                "title": meta.get("title"),
+                "channel": meta.get("channel"),
+                "keywords": meta.get("keywords") or [],
+                "published_at": meta.get("published_at"),
+                "dviews": int(dviews) if dviews is not None else None,
+                "views": int(latest_views) if latest_views is not None else None,
+                "days": int(days),
+            }
+        )
+    return out
 
 
 def compute(
@@ -422,7 +433,7 @@ def compute(
         "shopping": shopping_category_summary(con, week, filters_tag),
         "shopping_keywords": shopping_keyword_summary(con, week, filters_tag),
         "trending": latest_trending_hair(con, keyword_names),
-        "youtube_top": top_youtube_last_7d(con),
+        "youtube_top_videos": top_youtube_last_7d(con),
         "pinterest_candidates": pinterest_new_candidates(con),
         "pinterest_official": pinterest_official_topics(con),
     }
