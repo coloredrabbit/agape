@@ -116,7 +116,9 @@ def collect_search_trend(cfg: KeywordConfig) -> int:
 
     rows: list[dict[str, Any]] = []
     with httpx.Client() as client:
-        for batch_id, batch in enumerate(_chunks(cfg.keywords, NAVER_GROUPS_PER_REQUEST)):
+        for batch_id, batch in enumerate(
+            _chunks(cfg.naver_keywords, NAVER_GROUPS_PER_REQUEST)
+        ):
             groups = [{"groupName": ANCHOR_GROUP, "keywords": [cfg.anchor]}] + [
                 {"groupName": kw.name, "keywords": ([kw.name] + kw.synonyms)[:20]}
                 for kw in batch

@@ -25,8 +25,41 @@ filters:
   ages: []
 
 # keywords[<카테고리>][]: name(대표 표기), synonyms(데이터랩 그룹에 함께 묶을 표기 변형),
-#   shopping: true 이면 쇼핑인사이트 키워드 클릭 트렌드도 수집
+#   shopping: true 이면 쇼핑인사이트 키워드 클릭 트렌드도 수집,
+#   naver: false 면 데이터랩 수집에서 제외(핀터레스트/유튜브 발굴용 해외 키워드)
 keywords:
+  # 주력 스타일 — `agape focus`로 심층 분석하는 대상.
+  # 표기별 검색 강도를 실측해 수요가 있는 것만 넣었다(측정값은 앵커=미용실 대비 평균):
+  #   허그펌 57.8 · 씨컬펌 28.7 · 레이어드C컬펌 21.2 · 볼륨레이어드펌 2.0 · 볼륨레이어드 0.0
+  signature:
+    - name: 레이어드C컬펌
+      synonyms: [레이어드 C컬펌, 레이어드c컬펌, 레이어드씨컬펌, 레이어드 씨컬펌]
+    - name: 허그펌
+      synonyms: [허그 펌]
+    # 인스타에서 주력으로 쓰는 태그지만 네이버 검색 수요는 낮다(볼륨레이어드 단독은 0).
+    # 갭을 계속 관찰하려고 추적만 하고, 플레이스 메뉴명 표기로는 쓰지 않는다.
+    - name: 볼륨레이어드펌
+      synonyms: [볼륨 레이어드펌, 볼륨레이어드, 볼륨레이어드컷]
+
+  # 해외 발굴용 — 네이버 수집 제외(한국어 검색이 아니라 데이터랩에 신호가 없다).
+  # 인스타 실측에서 영어 태그 성과가 좋아 관찰 대상에 넣는다:
+  #   butterflyhaircut 94,590 · koreanhair 66,873 · volumelayered 65,004 (조회 중앙값)
+  global:
+    - name: butterfly haircut
+      naver: false
+    - name: korean layered perm
+      naver: false
+    - name: layered c curl perm
+      naver: false
+    - name: korean hair
+      naver: false
+    - name: くびれヘア          # 일본에서 이 스타일 계열을 부르는 대표어
+      naver: false
+    - name: 韓国ヘア
+      naver: false
+    - name: レイヤーカット
+      naver: false
+
   cut:
     - name: 허쉬컷
       synonyms: [허쉬 컷]
@@ -68,8 +101,10 @@ keywords:
     - name: 허쉬펌
     - name: 레이어드펌
     - name: 남자펌
+    # 한글 음차 표기가 알파벳 표기보다 검색이 많다(씨컬펌 28.7 vs C컬펌 10.3) — 같은 그룹으로 묶어
+    # 실제 수요를 온전히 잡는다.
     - name: C컬펌
-      synonyms: [c컬펌]
+      synonyms: [c컬펌, 씨컬펌, 씨컬 펌]
     - name: S컬펌
       synonyms: [s컬펌]
     - name: 글램펌
