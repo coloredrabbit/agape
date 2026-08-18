@@ -50,6 +50,27 @@ PINTEREST_LOOKBACK_DAYS = 90
 PINTEREST_COOKIE = os.environ.get("PINTEREST_COOKIE", "")
 PINTEREST_CRAWLER_UA = os.environ.get("PINTEREST_CRAWLER_UA", "").strip() or CRAWLER_USER_AGENT
 
+# Apify (선택) — 인스타그램 데이터. task는 사용자가 Apify 콘솔에서 직접 만들고 실행한다.
+# 파이프라인은 "마지막 성공 run의 데이터셋을 읽기만" 한다 — run 트리거는 크레딧을 소모하므로
+# 무료 크레딧 운영을 위해 아예 구현하지 않았다(새로 긁으려면 Apify 콘솔에서 직접 실행).
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
+APIFY_INSTAGRAM_TASK_ID = os.environ.get("APIFY_INSTAGRAM_TASK_ID", "")
+APIFY_DATASET_LIMIT = int(os.environ.get("APIFY_DATASET_LIMIT") or "500")
+
+# 크레딧 소진 경고 — 수신 주소는 코드에 두지 않는다(channels.yaml을 gitignore하는 것과 같은 이유).
+# 임계값은 사용률(0~1) 목록이며, 청구 주기당 각 단계에서 한 번씩만 보낸다.
+APIFY_ALERT_EMAIL = os.environ.get("APIFY_ALERT_EMAIL", "")
+APIFY_ALERT_THRESHOLDS = tuple(
+    sorted(
+        float(x) for x in (os.environ.get("APIFY_ALERT_THRESHOLDS") or "0.8,0.95").split(",") if x.strip()
+    )
+)
+
+# Google Sheets 적재 (선택) — Apps Script 웹앱 URL로 POST한다.
+# 서비스 계정/OAuth 대신 이 방식을 쓰면 파이썬 의존성이 늘지 않는다(httpx만 사용).
+GSHEET_WEBHOOK_URL = os.environ.get("GSHEET_WEBHOOK_URL", "")
+GSHEET_WEBHOOK_SECRET = os.environ.get("GSHEET_WEBHOOK_SECRET", "")
+
 # Pinterest 공식 Trends API (선택) — US/글로벌 선행 신호용. 한국(KR)은 공식 API 미지원.
 # client_credentials 방식이라 OAuth 리다이렉트가 필요 없다(앱 ID/Secret만).
 # 단, Trends 데이터 접근은 Pinterest 파트너/승인이 필요할 수 있어 미승인 시 403이 난다.
@@ -117,6 +138,10 @@ class Keyword:
     category: str
     synonyms: list[str] = field(default_factory=list)
     shopping: bool = False
+    # 한국어가 아닌 발굴용 키워드는 데이터랩에 신호가 없다 — 요청 슬롯만 쓰고 리포트의
+    # "네이버 데이터 확보 N개" 집계도 흐려지므로 검색어트렌드 수집에서 제외한다.
+    # 핀터레스트/유튜브 발굴에는 그대로 쓰인다.
+    naver: bool = True
 
 
 @dataclass(frozen=True)
@@ -136,6 +161,11 @@ class KeywordConfig:
     @property
     def shopping_keywords(self) -> list[Keyword]:
         return [k for k in self.keywords if k.shopping]
+
+    @property
+    def naver_keywords(self) -> list[Keyword]:
+        """데이터랩 검색어트렌드 수집 대상 (해외 발굴용 키워드 제외)."""
+        return [k for k in self.keywords if k.naver]
 
 
 @dataclass(frozen=True)
@@ -192,6 +222,7 @@ def load_keyword_config(path: Path | None = None) -> KeywordConfig:
                     category=category,
                     synonyms=[str(s) for s in item.get("synonyms", [])],
                     shopping=bool(item.get("shopping", False)),
+                    naver=bool(item.get("naver", True)),
                 )
             )
 
