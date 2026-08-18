@@ -306,7 +306,9 @@ def _table_html(block: list[str], rich: bool = False) -> str:
     rich=False(이메일): 인라인 스타일로 테두리를 그린다 — 메일 클라이언트는 <style>을
     자주 제거하므로 인라인이 유일하게 믿을 수 있는 수단이다.
     rich=True(웹): 스타일을 전혀 넣지 않고 클래스만 남겨 페이지 CSS가 그린다. 덕분에
-    페이지 쪽에서 !important로 인라인 스타일과 싸울 필요가 없다.
+    페이지 쪽에서 !important로 인라인 스타일과 싸울 필요가 없다. 또 시그널 라벨이 든 행에는
+    data-signal을 심는다 — 상단 KPI 카드를 누르면 그 시그널 행만 남기는 필터의 손잡이다
+    (마크다운에는 속성을 실을 수 없으므로 HTML 단계에서 붙인다).
     """
     rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in block]
     body = [r for r in rows if not all(re.fullmatch(r":?-{3,}:?", c or "") for c in r)]
@@ -318,7 +320,11 @@ def _table_html(block: list[str], rich: bool = False) -> str:
         out.append("<thead><tr>" + "".join(f"<th>{_inline_html(c)}</th>" for c in head) + "</tr></thead>")
         out.append("<tbody>")
         for r in rest:
-            out.append("<tr>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>")
+            sig = next((c for c in r if c in _SIGNAL_PILL), "")
+            attr = f' data-signal="{sig}"' if sig else ""
+            out.append(
+                f"<tr{attr}>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
+            )
         out.append("</tbody></table></div>")
         return "\n".join(out)
     out = ['<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;border:1px solid #ddd;">']
@@ -445,8 +451,14 @@ def _lines_html(lines: list[str]) -> str:
     return "\n".join(out)
 
 
-def _body_cards_html(md: str) -> tuple[str, str, str, list[tuple[str, str]], str]:
-    """마크다운 → (문서 제목, 리드 HTML, 카드 HTML, 내비 항목, 각주 HTML). 웹 문서 전용."""
+def _body_cards_html(
+    md: str,
+) -> tuple[str, str, str, list[tuple[str, str]], str, list[dict[str, Any]]]:
+    """마크다운 → (문서 제목, 리드 HTML, 카드 HTML, 내비 항목, 각주 HTML, 섹션 목록).
+
+    섹션 목록은 KPI 카드가 "어느 카드로 보낼지"를 제목으로 찾기 위해 필요하다 — 섹션 id는
+    등장 순서(s1, s2…)라서 데이터에 따라 번호가 밀리므로 하드코딩하면 안 된다.
+    """
     doc_title, lead, sections, notes = _md_sections(md)
     lead_html = f'<p class="lead">{_inline_html(" ".join(lead))}</p>' if lead else ""
     cards = [
@@ -457,7 +469,7 @@ def _body_cards_html(md: str) -> tuple[str, str, str, list[tuple[str, str]], str
     ]
     nav = [(s["id"], _nav_label(s["title"])) for s in sections]
     notes_html = "".join(f"<p>{_inline_html(n)}</p>" for n in notes)
-    return doc_title, lead_html, "\n".join(cards), nav, notes_html
+    return doc_title, lead_html, "\n".join(cards), nav, notes_html, sections
 
 
 _PAGE_STYLE = """
@@ -532,6 +544,24 @@ a { color: var(--blue); }
 /* 채도 높은 파란 배경 위에서는 흰색을 흐리게 하면 AA를 못 넘는다(.68 = 3.22:1).
    .92 = 4.57:1로 올리고 위계는 색이 아니라 글자 크기·굵기로 준다. */
 .kpi.hot .h { color: rgba(255,255,255,.92); }
+/* 클릭 가능한 KPI — 눌러도 아무 일이 없는 것처럼 보이지 않게 커서·호버·"보기 →" 문구로
+   어포던스를 준다(수가 0인 카드는 <div>로 남아 이 규칙이 걸리지 않는다). */
+a.kpi { display: block; text-decoration: none; color: inherit; cursor: pointer;
+  transition: transform .15s, box-shadow .15s; }
+a.kpi:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(31,42,68,.11); }
+a.kpi.hot:hover { box-shadow: 0 10px 26px rgba(59,91,254,.44); }
+a.kpi:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.kpi .go { display: block; margin-top: 9px; font-size: 11px; font-weight: 600;
+  color: var(--blue); }
+.kpi.hot .go { color: #fff; }
+.kpi.on { outline: 2px solid var(--blue); outline-offset: 3px; }
+tr[hidden] { display: none; }
+.filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: -2px 0 14px; font-size: 12.5px; color: var(--ink-2); }
+.filter-bar button { border: 1px solid var(--line); background: #fff; color: var(--blue-ink);
+  border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12px; font-weight: 600;
+  cursor: pointer; }
+.filter-bar button:hover { background: var(--blue-50); }
 
 /* ── 카드 ─────────────────────────────────────────────── */
 .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
@@ -643,6 +673,55 @@ _PAGE_SCRIPT = """
   }, { rootMargin: '-72px 0px -65% 0px' });
   targets.forEach(function (t) { io.observe(t); });
 })();
+
+/* KPI 카드 → 근거 표의 해당 시그널 행만 남기기. 앵커 이동은 기본 동작에 맡기고(그래서
+   JS가 없어도 이동은 된다) 여기서는 행 숨김과 해제 배너만 담당한다. */
+(function () {
+  var cards = [].slice.call(document.querySelectorAll('a.kpi[data-filter]'));
+  if (!cards.length) return;
+
+  function reset() {
+    cards.forEach(function (c) { c.classList.remove('on'); });
+    [].forEach.call(document.querySelectorAll('tr[data-signal]'), function (tr) {
+      tr.hidden = false;
+    });
+    [].forEach.call(document.querySelectorAll('.filter-bar'), function (b) { b.remove(); });
+  }
+
+  function banner(section, label, shown, card) {
+    var bar = document.createElement('div');
+    bar.className = 'filter-bar';
+    var msg = document.createElement('span');
+    msg.textContent = '필터: ' + label + ' — ' + shown + '개 행';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '전체 보기';
+    btn.addEventListener('click', function () { reset(); card.focus(); });
+    bar.appendChild(msg);
+    bar.appendChild(btn);
+    var title = section.querySelector('.card-title');
+    if (title && title.nextSibling) section.insertBefore(bar, title.nextSibling);
+    else section.appendChild(bar);
+  }
+
+  cards.forEach(function (card) {
+    card.addEventListener('click', function () {
+      var label = card.getAttribute('data-filter');
+      var section = document.querySelector(card.getAttribute('href'));
+      var active = card.classList.contains('on');
+      reset();                       // 다른 카드의 필터를 먼저 걷어낸다
+      if (active || !section) return;  // 같은 카드를 다시 누르면 해제만 하고 끝
+      var shown = 0;
+      [].forEach.call(section.querySelectorAll('tr[data-signal]'), function (tr) {
+        var hit = tr.getAttribute('data-signal') === label;
+        tr.hidden = !hit;
+        if (hit) shown++;
+      });
+      card.classList.add('on');
+      banner(section, label, shown, card);
+    });
+  });
+})();
 """
 
 
@@ -683,8 +762,19 @@ def _icon(name: str, size: int = 21) -> str:
     )
 
 
-def _kpi_cards(result: dict[str, Any]) -> str:
-    """상단 KPI 카드 — render_markdown의 시그널 요약 한 줄을 대체한다(같은 수치)."""
+def _section_id(sections: list[dict[str, Any]], prefix: str) -> str:
+    """제목이 prefix로 시작하는 섹션의 id. 없으면 빈 문자열(→ KPI를 링크로 만들지 않음)."""
+    return next((s["id"] for s in sections if s["title"].startswith(prefix)), "")
+
+
+def _kpi_cards(result: dict[str, Any], sections: list[dict[str, Any]]) -> str:
+    """상단 KPI 카드 — render_markdown의 시그널 요약 한 줄을 대체한다(같은 수치).
+
+    각 카드는 근거가 되는 표로 가는 링크다. 시그널 카드(강한 후보/관찰/계절성 의심)는
+    이동에 그치지 않고 그 표에서 해당 시그널 행만 남긴다 — 숫자만 보여주고 "그게 어느
+    키워드인지"로 이어지지 않으면 반쪽이기 때문이다. 필터는 진행적 향상이라 JS가 없으면
+    앵커 이동만 동작한다. 수가 0인 카드는 보여줄 행이 없으므로 링크로 만들지 않는다.
+    """
     metrics: list[KeywordMetrics] = result.get("metrics") or []
     counts = {"강한 후보": 0, "관찰": 0, "계절성 의심": 0}
     for m in metrics:
@@ -697,20 +787,39 @@ def _kpi_cards(result: dict[str, Any]) -> str:
     yt_n = sum(1 for m in metrics if m.yt_views is not None)
     pin_n = sum(1 for m in metrics if m.pin_mom is not None)
 
+    sig_id = _section_id(sections, "급등 시그널")
+    mover_id = _section_id(sections, "네이버 검색 상승")
+    cat_id = _section_id(sections, "카테고리 동향")
+
+    # (아이콘, 수, 라벨, 힌트, 강조카드, 대상섹션id, 필터할 시그널, 링크 문구)
     cards = [
-        ("spark", counts["강한 후보"], "강한 후보", "네이버 급등 + 동반 상승", True),
-        ("eye", counts["관찰"], "관찰", "단일 소스 급등", False),
-        ("repeat", counts["계절성 의심"], "계절성 의심", "작년에도 이맘때 높음", False),
-        ("trend", ups, "WoW 상승", f"하락 {downs}개", False),
-        ("tag", len(metrics), "추적 키워드", f"네이버 {naver_n} · 유튜브 {yt_n} · 핀 {pin_n}", False),
+        ("spark", counts["강한 후보"], "강한 후보", "네이버 급등 + 동반 상승", True,
+         sig_id, "강한 후보", "해당 행만 보기"),
+        ("eye", counts["관찰"], "관찰", "단일 소스 급등", False,
+         sig_id, "관찰", "해당 행만 보기"),
+        ("repeat", counts["계절성 의심"], "계절성 의심", "작년에도 이맘때 높음", False,
+         sig_id, "계절성 의심", "해당 행만 보기"),
+        ("trend", ups, "WoW 상승", f"하락 {downs}개", False,
+         mover_id, "", "상승 톱 표로"),
+        ("tag", len(metrics), "추적 키워드", f"네이버 {naver_n} · 유튜브 {yt_n} · 핀 {pin_n}", False,
+         cat_id, "", "카테고리 동향으로"),
     ]
     out = []
-    for ico, n, label, hint, hot in cards:
-        out.append(
-            f'<div class="kpi{" hot" if hot else ""}">{_icon(ico)}'
-            f'<div class="n">{n}</div><div class="l">{_esc(label)}</div>'
-            f'<div class="h">{_esc(hint)}</div></div>'
+    for ico, num, label, hint, hot, target, sig, go in cards:
+        cls = f'kpi{" hot" if hot else ""}'
+        inner = (
+            f'{_icon(ico)}<div class="n">{num}</div><div class="l">{_esc(label)}</div>'
+            f'<div class="h">{_esc(hint)}</div>'
         )
+        if target and num:
+            # sig는 _SIGNAL_PILL의 고정 라벨이라 속성에 그대로 넣어도 안전하다(따옴표 없음).
+            filt = f' data-filter="{sig}"' if sig else ""
+            out.append(
+                f'<a class="{cls}" href="#{target}"{filt}>{inner}'
+                f'<span class="go">{_esc(go)} →</span></a>'
+            )
+        else:
+            out.append(f'<div class="{cls}">{inner}</div>')
     return '<div class="kpis">' + "".join(out) + "</div>"
 
 
@@ -922,7 +1031,7 @@ def html_document(
 
     result가 없으면(focus 대시보드) KPI 카드와 리치 섹션을 생략하고 본문 카드만 그린다.
     """
-    doc_title, lead_html, cards, nav, notes_html = _body_cards_html(markdown_text)
+    doc_title, lead_html, cards, nav, notes_html, sections = _body_cards_html(markdown_text)
     extras: list[tuple[str, str, str]] = []
     if result:
         extras = [
@@ -931,7 +1040,7 @@ def html_document(
             ("charts", "주간 추이", _charts_html(result)),
         ]
     nav = nav + [(sid, label) for sid, label, html in extras if html]
-    kpis = _kpi_cards(result) if result else ""
+    kpis = _kpi_cards(result, sections) if result else ""
     head_title = doc_title or title
     stamp = f"<p>생성 시각: {_esc(generated_at)}</p>" if generated_at else ""
     foot = f"<footer>{notes_html}{stamp}</footer>" if (notes_html or stamp) else ""
