@@ -130,9 +130,12 @@ def cmd_apify_usage(_: argparse.Namespace) -> int:
     return 0
 
 
+# run_finished_at(Apify가 실제로 긁은 시각)과 updated_at(우리가 시트에 쓴 시각)을 나란히
+# 둔다 — 둘의 간격이 벌어지면 "매일 잘 돌고 있는데 수치가 안 변한다"가 아니라 "task가 멈췄다"
+# 임을 시트만 보고 알 수 있다.
 SHEET_HEADER = ["key", "link", "title", "content", "hashtags", "views", "view_count",
                 "likes", "comments", "duration_sec", "music", "is_pinned", "owner",
-                "posted_at", "updated_at"]
+                "posted_at", "run_finished_at", "updated_at"]
 CONTENT_MAX = 5000  # 시트 셀 부담을 줄이기 위한 본문 상한 (셀 한도 5만자보다 훨씬 아래)
 
 
@@ -151,26 +154,40 @@ def cmd_export_sheet(args: argparse.Namespace) -> int:
         print("적재할 인스타 데이터가 없습니다 — 먼저 collect를 실행하세요")
         return 1
     con = duckdb.connect()
+    glob = storage.source_glob("instagram_posts")
+    # run_finished_at은 나중에 추가된 필드다. 모든 파일에 없으면 union_by_name도 컬럼을
+    # 만들어주지 못해 SELECT가 BinderException으로 죽으므로, 존재를 확인하고 없으면 NULL로 채운다.
+    present = {
+        r[0]
+        for r in con.execute(
+            "DESCRIBE SELECT * FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)",
+            [glob],
+        ).fetchall()
+    }
+    run_col = "run_finished_at" if "run_finished_at" in present else "NULL AS run_finished_at"
     rows = con.execute(
-        """
+        f"""
         SELECT post_id, shortcode, url, caption, hashtags, views, view_count,
-               likes, comments, duration_sec, music, is_pinned, owner, posted_at
+               likes, comments, duration_sec, music, is_pinned, owner, posted_at,
+               run_finished_at
         FROM (
             SELECT post_id, shortcode, url, caption, hashtags, views, view_count,
                    likes, comments, duration_sec, music, is_pinned, owner, posted_at,
+                   {run_col},
                    ROW_NUMBER() OVER (PARTITION BY url ORDER BY fetched_at DESC) AS rn
             FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
             WHERE url IS NOT NULL
         ) WHERE rn = 1
         ORDER BY coalesce(TRY_CAST(views AS BIGINT), 0) DESC
         """,
-        [storage.source_glob("instagram_posts")],
+        [glob],
     ).fetchall()
 
     now = datetime.now(timezone.utc).isoformat()
     payload = []
     for (post_id, shortcode, url, caption, hashtags, views, view_count,
-         likes, comments, duration_sec, music, is_pinned, owner, posted_at) in rows:
+         likes, comments, duration_sec, music, is_pinned, owner, posted_at,
+         run_finished_at) in rows:
         caption = caption or ""
         title = " ".join(caption.split("\n")[0].split())[:80]
         tags = ", ".join(str(t) for t in (hashtags or []))
@@ -189,6 +206,7 @@ def cmd_export_sheet(args: argparse.Namespace) -> int:
             "Y" if is_pinned else "",
             owner or "",
             posted_at or "",
+            run_finished_at or "",
             now,
         ]
         payload.append([gsheet.sheet_safe(v) for v in cells])

@@ -57,6 +57,12 @@ APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 APIFY_INSTAGRAM_TASK_ID = os.environ.get("APIFY_INSTAGRAM_TASK_ID", "")
 APIFY_DATASET_LIMIT = int(os.environ.get("APIFY_DATASET_LIMIT") or "500")
 
+# run 신선도 — 파이프라인은 "마지막 성공 run"을 읽으므로, task가 멈춰도(크레딧 소진·액터 오류)
+# 몇 달 전 데이터를 최신인 것처럼 계속 보고할 수 있다. 나이를 재서 경고/중단한다.
+# 매일 도는 task 기준 26시간(하루 + 여유)이면 지연, 72시간이면 사실상 멈춤으로 본다.
+APIFY_STALE_WARN_HOURS = float(os.environ.get("APIFY_STALE_WARN_HOURS") or "26")
+APIFY_STALE_SKIP_HOURS = float(os.environ.get("APIFY_STALE_SKIP_HOURS") or "72")
+
 # 크레딧 소진 경고 — 수신 주소는 코드에 두지 않는다(channels.yaml을 gitignore하는 것과 같은 이유).
 # 임계값은 사용률(0~1) 목록이며, 청구 주기당 각 단계에서 한 번씩만 보낸다.
 APIFY_ALERT_EMAIL = os.environ.get("APIFY_ALERT_EMAIL", "")

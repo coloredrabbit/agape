@@ -198,7 +198,9 @@ uv run agape query 다운펌 --device mo --gender m                   # 모바�
 1. 이 프로젝트를 GitHub 레포로 푸시.
 2. **Settings → Secrets and variables → Actions → Secrets**에 키 등록:
    `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`, `YOUTUBE_API_KEY`,
-   (선택) `PINTEREST_APP_ID/SECRET`, `SLACK_WEBHOOK_URL`, `SMTP_HOST/PORT/USER/PASSWORD/FROM`.
+   (선택) `PINTEREST_APP_ID/SECRET`, `SLACK_WEBHOOK_URL`, `SMTP_HOST/PORT/USER/PASSWORD/FROM`,
+   (인스타 쓰면) `APIFY_TOKEN`, `APIFY_INSTAGRAM_TASK_ID`, `GSHEET_WEBHOOK_URL`,
+   `GSHEET_WEBHOOK_SECRET`, `APIFY_ALERT_EMAIL` — 아래 "인스타그램" 절 참고.
 3. (선택) 이메일/슬랙 전송하려면 **Variables**에 `CHANNELS_YAML`을 추가하고 `channels.yaml`
    내용을 그대로 붙여넣기 (수신자 이메일을 레포에 커밋하지 않기 위함).
 4. 리포트 URL을 원하면 **Settings → Pages → Source = GitHub Actions** 로 한 번 지정.
@@ -212,6 +214,71 @@ uv run agape query 다운펌 --device mo --gender m                   # 모바�
   - Pro가 없으면 **레포 변수 `PUBLISH_PAGES=false`** 만 설정 → Pages 단계는 건너뛰고
     `collect`/`report`/Slack/이메일은 그대로 동작한다. (Pages URL 대신 Slack/이메일로 수신.)
 - 즉 전환은 "가시성 변경" + (필요 시) "변수 하나"로 끝난다.
+
+## 인스타그램 (Apify → Google Sheets)
+
+인스타 데이터만 흐름이 다르다. 공식 Graph API는 **내 계정 통계만** 주고 남의 게시물은 못
+보므로, Apify 액터가 긁은 결과를 읽어 쓴다. 파이프라인은 **run을 트리거하지 않고**
+마지막 성공 run의 데이터셋만 읽으므로 **무료 크레딧을 소모하지 않는다** (실행은 Apify 콘솔
+스케줄이 담당). 원본 JSONL은 제3자 계정명·캡션이라 레포에 커밋하지 않고(`git add`에서 제외),
+영속 저장소는 **Google Sheet**다.
+
+```
+Apify task (콘솔 스케줄, 매일)
+   └─ 성공 → 웹훅 → GitHub Actions
+                      └─ agape collect  : 마지막 성공 run 읽기 + 신선도 검사
+                      └─ agape export-sheet : key 기준 upsert (view 수 최신화)
+                      └─ agape sheet-show   : Actions 로그에 시트 내용 출력
+```
+
+필요한 시크릿: `APIFY_TOKEN`, `APIFY_INSTAGRAM_TASK_ID`, `GSHEET_WEBHOOK_URL`,
+`GSHEET_WEBHOOK_SECRET`, (선택) `APIFY_ALERT_EMAIL`.
+시트 쪽 Apps Script 코드와 배포 방법은 `src/gsheet.py` 모듈 독스트링에 있다.
+
+### run 신선도 검사
+
+파이프라인은 항상 "마지막 성공 run"을 보기 때문에, task가 멈춰도(크레딧 소진·액터 오류·
+스케줄 해제) **조용히 성공하며 옛 데이터를 최신인 것처럼 리포트에 싣는다.** 이걸 막으려고
+run의 `finishedAt`으로 나이를 재고, 임계를 넘으면 알린다:
+
+| 나이 | 동작 |
+|---|---|
+| < 26h | 정상 |
+| ≥ `APIFY_STALE_WARN_HOURS` (26h) | Actions 요약에 경고 — 지연/실패 의심 |
+| ≥ `APIFY_STALE_SKIP_HOURS` (72h) | 경고 후 **시트 갱신 생략** (SKIP) |
+
+3일 이상 묵으면 아예 쓰지 않는 이유: 옛 데이터로 시트를 덮으면 `updated_at`만 갱신돼
+"방금 확인했고 수치가 그대로"인 것과 구분이 안 된다. 쓰지 않으면 시트의 `updated_at`이
+멈춘 시점에 머물러 문제가 눈에 보인다. 시트에는 `run_finished_at`(Apify가 실제로 긁은 시각)과
+`updated_at`(우리가 쓴 시각)이 나란히 있어 시트만 봐도 판별된다.
+임계는 레포 변수 `APIFY_STALE_WARN_HOURS` / `APIFY_STALE_SKIP_HOURS`로 조정한다.
+
+### Apify 웹훅으로 트리거 (권장)
+
+cron만 쓰면 "Apify가 09:00에 끝났겠지"라고 **가정**하고 09:30에 읽는다 — 실행이 늦으면
+헛도는 셈이다. 웹훅으로 바꾸면 데이터가 준비된 정확한 시점에 돌고, task가 실패하면
+애초에 트리거되지 않는다.
+
+1. **GitHub 토큰 발급** — Settings → Developer settings → Personal access tokens.
+   - classic: `public_repo` 스코프만 (공개 레포면 이걸로 충분 — `repo` 전체는 과하다)
+   - fine-grained: 이 레포만 지정 + `Contents: Read and write`
+2. **Apify 콘솔 → 해당 Task → Integrations → Webhook** 추가:
+   - Event types: `Run succeeded`
+   - URL: `https://api.github.com/repos/coloredrabbit/agape/dispatches`
+   - Headers template:
+     ```json
+     { "Authorization": "Bearer <발급한_토큰>", "Accept": "application/vnd.github+json" }
+     ```
+   - Payload template:
+     ```json
+     { "event_type": "apify-instagram-finished" }
+     ```
+3. 워크플로의 `repository_dispatch.types`가 이 `event_type`과 일치해야 한다.
+   `repository_dispatch`는 **기본 브랜치의 워크플로 파일만** 인식한다.
+
+트레이드오프: GitHub 토큰을 제3자(Apify)에 보관하게 된다. 위 최소 스코프를 쓰고, 유출이
+의심되면 토큰만 폐기·재발급하면 된다. 매일 cron은 웹훅이 안 왔을 때의 **안전망으로 남겨둔다**
+— 같은 날 두 번 돌아도 저장은 병합 후 읽기 시 dedupe되고 시트는 key 기준 upsert라 무해하다.
 
 ## 키워드 사전
 

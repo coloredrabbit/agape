@@ -12,9 +12,14 @@
 name: agape trend pipeline
 
 on:
+  # Apify task가 성공하면 웹훅으로 즉시 트리거된다 — "09:00에 끝났겠지" 하는 시간 가정을
+  # 없애는 주 경로다(데이터가 준비된 정확한 시점에 실행되고, task가 실패하면 아예 안 돈다).
+  # 설정 방법은 README "Apify 웹훅으로 트리거" 참고.
+  repository_dispatch:
+    types: [apify-instagram-finished]
   schedule:
-    # Apify 인스타 task가 매일 09:00 KST에 돌므로(사용자가 Apify 콘솔 스케줄로 설정),
-    # 그 결과를 같은 날 반영하려고 수집을 09:30 KST로 맞춘다.
+    # 웹훅이 안 왔을 때를 위한 안전망. 웹훅이 정상 동작하면 같은 날 두 번 도는데, 저장은
+    # 병합·읽기 시 dedupe되고 시트는 key 기준 upsert라 중복이 쌓이지 않는다(무해한 중복).
     - cron: "30 0 * * *"     # 매일 09:30 KST — collect + 시트 upsert
     - cron: "0 1 * * 1"      # 매주 월 10:00 KST — discover + report + Pages
   workflow_dispatch:          # 수동 실행 버튼(URL로 트리거 가능)
@@ -43,6 +48,9 @@ env:
   # Apify — 마지막 성공 run의 데이터만 읽는다(크레딧 미소모). run 트리거는 하지 않음.
   APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
   APIFY_INSTAGRAM_TASK_ID: ${{ secrets.APIFY_INSTAGRAM_TASK_ID }}
+  # run 신선도 임계(시간) — 기본 26/72. 필요하면 레포 변수로 조정한다.
+  APIFY_STALE_WARN_HOURS: ${{ vars.APIFY_STALE_WARN_HOURS }}
+  APIFY_STALE_SKIP_HOURS: ${{ vars.APIFY_STALE_SKIP_HOURS }}
   GSHEET_WEBHOOK_URL: ${{ secrets.GSHEET_WEBHOOK_URL }}
   GSHEET_WEBHOOK_SECRET: ${{ secrets.GSHEET_WEBHOOK_SECRET }}
   APIFY_ALERT_EMAIL: ${{ secrets.APIFY_ALERT_EMAIL }}
@@ -68,11 +76,13 @@ jobs:
           EVENT: ${{ github.event_name }}
           FULL: ${{ inputs.full }}
         run: |
+          # repository_dispatch(Apify 웹훅)는 SCHEDULE이 비어 있어 daily로 떨어진다 — 의도한
+          # 동작이다. 주간 리포트/Pages는 월요일 cron에서만 나가야 하므로 여기 추가하지 말 것.
           WEEKLY=false
           [ "$SCHEDULE" = "0 1 * * 1" ] && WEEKLY=true
           { [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" = "true" ]; } && WEEKLY=true
           echo "weekly=$WEEKLY" >> "$GITHUB_OUTPUT"
-          echo "실행 모드: weekly=$WEEKLY"
+          echo "트리거: $EVENT${SCHEDULE:+ (cron $SCHEDULE)} · 실행 모드: weekly=$WEEKLY"
 
       - uses: astral-sh/setup-uv@v5
         with:
