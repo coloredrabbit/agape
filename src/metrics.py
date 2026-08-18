@@ -71,7 +71,13 @@ def last_complete_week(today: date | None = None) -> date:
 def _naver_weekly(
     con: duckdb.DuckDBPyConnection, week: date, filters_tag: str
 ) -> dict[str, dict[str, Any]]:
-    """filters_tag가 일치하는 행만 집계 — 필터가 다른 시계열은 스케일이 달라 섞으면 안 된다."""
+    """filters_tag가 일치하는 행만 집계 — 필터가 다른 시계열은 스케일이 달라 섞으면 안 된다.
+
+    ratio_adj에 TRY_CAST를 씌우는 이유: 앵커가 응답에 없으면 수집기가 ratio_adj=None으로 쓰고
+    (naver.py의 anchor_mean 분기), 어떤 이유로 전 구간이 null이면 DuckDB가 컬럼 타입을 JSON으로
+    추론해 avg()가 Binder Error로 죽는다 — 앵커 키워드 오타 같은 설정 실수 하나가 리포트 전체를
+    무너뜨리지 않게 방어한다. 값이 정상일 때 결과는 완전히 동일하다.
+    """
     if not storage.has_data("naver_search"):
         return {}
     rows = con.execute(
@@ -79,11 +85,11 @@ def _naver_weekly(
         WITH raw AS (
             SELECT keyword, CAST(date AS DATE) AS d, ratio_adj,
                    ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?, union_by_name=true)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
             WHERE ratio_adj IS NOT NULL AND coalesce(filters, 'all') = ?
         ),
         weekly AS (
-            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(ratio_adj) AS vol
+            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(TRY_CAST(ratio_adj AS DOUBLE)) AS vol
             FROM raw WHERE rn = 1
             GROUP BY 1, 2
         ),
@@ -129,11 +135,11 @@ def _naver_history(
         WITH raw AS (
             SELECT keyword, CAST(date AS DATE) AS d, ratio_adj,
                    ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?, union_by_name=true)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
             WHERE ratio_adj IS NOT NULL AND coalesce(filters, 'all') = ?
         ),
         weekly AS (
-            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(ratio_adj) AS vol
+            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(TRY_CAST(ratio_adj AS DOUBLE)) AS vol
             FROM raw WHERE rn = 1
             GROUP BY 1, 2
         )
@@ -157,7 +163,7 @@ def _youtube_weekly(con: duckdb.DuckDBPyConnection, week: date) -> dict[str, dic
         WITH raw AS (
             SELECT video_id, CAST(date AS DATE) AS d, view_count, keywords,
                    ROW_NUMBER() OVER (PARTITION BY video_id, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
         ),
         delta AS (
             SELECT video_id, d, keywords,
@@ -195,7 +201,7 @@ def _pinterest_latest(con: duckdb.DuckDBPyConnection) -> dict[str, dict[str, Any
         SELECT keyword, wow, mom FROM (
             SELECT keyword, wow, mom,
                    ROW_NUMBER() OVER (PARTITION BY keyword ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
         ) WHERE rn = 1
         """,
         [storage.source_glob("pinterest_metrics")],
@@ -212,7 +218,7 @@ def pinterest_new_candidates(con: duckdb.DuckDBPyConnection) -> list[dict[str, A
         SELECT term, rank, wow, mom, in_dictionary FROM (
             SELECT term, rank, wow, mom, in_dictionary,
                    ROW_NUMBER() OVER (PARTITION BY term ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
         ) WHERE rn = 1
         ORDER BY rank
         """,
@@ -237,7 +243,7 @@ def pinterest_official_topics(con: duckdb.DuckDBPyConnection) -> list[dict[str, 
             SELECT region, interest, title, pct_growth_mom, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY title ORDER BY fetched_at DESC) AS rn,
                    max(fetched_at) OVER () AS latest
-            FROM read_ndjson_auto(?, union_by_name=true)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
         ) WHERE rn = 1 AND fetched_at = latest
         ORDER BY pct_growth_mom DESC NULLS LAST
         """,
@@ -258,7 +264,7 @@ def shopping_category_summary(
         WITH raw AS (
             SELECT keyword, CAST(date AS DATE) AS d, ratio,
                    ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?, union_by_name=true)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
             WHERE kind = 'category' AND coalesce(filters, 'all') = ?
         ),
         weekly AS (
@@ -290,11 +296,11 @@ def shopping_keyword_summary(
         WITH raw AS (
             SELECT keyword, CAST(date AS DATE) AS d, ratio_adj,
                    ROW_NUMBER() OVER (PARTITION BY keyword, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?, union_by_name=true)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
             WHERE kind = 'keyword' AND ratio_adj IS NOT NULL AND coalesce(filters, 'all') = ?
         ),
         weekly AS (
-            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(ratio_adj) AS vol
+            SELECT keyword, CAST(date_trunc('week', d) AS DATE) AS week, avg(TRY_CAST(ratio_adj AS DOUBLE)) AS vol
             FROM raw WHERE rn = 1
             GROUP BY 1, 2
         ),
@@ -316,14 +322,27 @@ def latest_trending_hair(con: duckdb.DuckDBPyConnection, keyword_names: list[str
     """최신 인기 급상승 차트에서 헤어 관련 제목만 추린다."""
     if not storage.has_data("youtube_trending"):
         return []
+    # 같은 날 수집이 두 번 이상이면 같은 date에 여러 스냅샷이 쌓인다(write_jsonl은 병합 저장).
+    # 인기차트는 '그 시점의 순위 목록' 전체가 한 덩어리라, 행별로 최신본을 고르면(예: (date,rank)
+    # 기준) 스냅샷 길이가 다를 때 짧은 쪽에 없는 순위가 옛 스냅샷에서 채워져 같은 영상이 두 번
+    # 나오거나 이미 차트에서 빠진 영상이 남는다. 그래서 최신 fetched_at 스냅샷 하나로 고정한다
+    # (pinterest_official_topics와 같은 방식). IS NOT DISTINCT FROM은 fetched_at이 없는 과거
+    # 스키마 파일에서 max가 NULL이 되어 결과가 조용히 비는 것을 막는다(그 경우 전체를 반환).
     rows = con.execute(
         """
+        WITH raw AS (
+            SELECT date, rank, title, channel, view_count, fetched_at
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
+        ),
+        snap AS (
+            SELECT * FROM raw WHERE date = (SELECT max(date) FROM raw)
+        )
         SELECT rank, title, channel, view_count
-        FROM read_ndjson_auto(?)
-        WHERE date = (SELECT max(date) FROM read_ndjson_auto(?))
+        FROM snap
+        WHERE fetched_at IS NOT DISTINCT FROM (SELECT max(fetched_at) FROM snap)
         ORDER BY rank
         """,
-        [storage.source_glob("youtube_trending"), storage.source_glob("youtube_trending")],
+        [storage.source_glob("youtube_trending")],
     ).fetchall()
     terms = ["머리", "헤어", "미용", "펌", "염색", "커트", "컷"] + keyword_names
     hits = []
@@ -353,7 +372,7 @@ def top_youtube_last_7d(
         WITH raw AS (
             SELECT video_id, CAST(date AS DATE) AS d, view_count,
                    ROW_NUMBER() OVER (PARTITION BY video_id, date ORDER BY fetched_at DESC) AS rn
-            FROM read_ndjson_auto(?)
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
         ),
         dedup AS (SELECT video_id, d, view_count FROM raw WHERE rn = 1),
         win AS (
@@ -390,6 +409,57 @@ def top_youtube_last_7d(
             }
         )
     return out
+
+
+INSTAGRAM_TOP_REELS = 10  # 리포트에 노출할 인기 릴스 수
+
+
+def top_instagram_reels(
+    con: duckdb.DuckDBPyConnection, limit: int = INSTAGRAM_TOP_REELS
+) -> list[dict[str, Any]]:
+    """인기 릴스 톱 N (조회수 우선, 없으면 좋아요 기준).
+
+    Apify 데이터는 스냅샷마다 같은 게시물이 다시 들어오므로 (url 기준) fetched_at 최신본만
+    남긴다 — 다른 소스와 같은 dedupe 규칙이다.
+    """
+    if not storage.has_data("instagram_posts"):
+        return []
+    rows = con.execute(
+        """
+        WITH raw AS (
+            SELECT url, caption, owner, likes, comments, views, is_reel, is_pinned, posted_at,
+                   ROW_NUMBER() OVER (PARTITION BY url ORDER BY fetched_at DESC) AS rn
+            FROM read_ndjson_auto(?, union_by_name=true, sample_size=-1)
+            WHERE url IS NOT NULL
+        )
+        SELECT url, caption, owner, likes, comments, views, posted_at
+        FROM raw
+        -- 고정 게시물 제외: 노출이 누적돼 뷰가 비정상적으로 높아 순위를 왜곡한다
+        WHERE rn = 1 AND coalesce(is_reel, false) AND NOT coalesce(is_pinned, false)
+        -- 행별 대체값: 조회수가 없는 액터/게시물은 좋아요로 순위를 매긴다.
+        -- (views, likes)를 사전식으로 쓰면 조회수 NULL인 인기 게시물이 조회수 1인 글보다
+        -- 뒤로 밀린다.
+        -- TRY_CAST 필수: 어떤 컬럼이 전부 NULL이면 DuckDB가 JSON 타입으로 잡고, coalesce가
+        -- JSON으로 승격되면 숫자가 아니라 문자열로 비교돼 5가 10보다 크게 정렬된다(실측).
+        ORDER BY coalesce(TRY_CAST(views AS BIGINT), TRY_CAST(likes AS BIGINT), 0) DESC,
+                 coalesce(TRY_CAST(likes AS BIGINT), 0) DESC
+        LIMIT ?
+        """,
+        [storage.source_glob("instagram_posts"), int(limit)],
+    ).fetchall()
+    return [
+        {
+            "rank": i,
+            "url": r[0],
+            "caption": r[1] or "",
+            "owner": r[2],
+            "likes": r[3],
+            "comments": r[4],
+            "views": r[5],
+            "posted_at": r[6],
+        }
+        for i, r in enumerate(rows, start=1)
+    ]
 
 
 def compute(
@@ -434,6 +504,7 @@ def compute(
         "shopping_keywords": shopping_keyword_summary(con, week, filters_tag),
         "trending": latest_trending_hair(con, keyword_names),
         "youtube_top_videos": top_youtube_last_7d(con),
+        "instagram_reels": top_instagram_reels(con),
         "pinterest_candidates": pinterest_new_candidates(con),
         "pinterest_official": pinterest_official_topics(con),
     }

@@ -47,6 +47,53 @@ def _valid_youtube_id(vid: str | None) -> bool:
     return bool(vid and _YOUTUBE_ID_RE.match(vid))
 
 
+CAPTION_MAX = 90
+CAPTION_INPUT_MAX = 2000  # 스캔 전 상한 (인스타 캡션 최대 2200자)
+# 인스타 게시물 URL만 허용 — 액터 출력을 그대로 믿지 않는다(스킴/도메인 인젝션 차단)
+_IG_URL_RE = re.compile(r"^https://(?:www\.)?instagram\.com/[A-Za-z0-9_\-/.]+/?$")
+
+
+def _safe_ig_url(url: str | None) -> bool:
+    return bool(url and _IG_URL_RE.match(url))
+
+
+def _visible_reels(reels: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """표시 가능한 릴스만 남기고 순위를 다시 매긴다.
+
+    URL 화이트리스트에서 걸러진 항목이 순위를 차지한 채 빠지면 #1이 없고 #3부터
+    시작하는 목록이 나오므로, 필터 후에 1..N으로 재부여한다.
+    """
+    out = []
+    for r in reels or []:
+        if _safe_ig_url(r.get("url")):
+            out.append({**r, "rank": len(out) + 1})
+    return out
+
+
+def _caption_summary(caption: str | None, limit: int = CAPTION_MAX) -> str:
+    """캡션을 한 줄 설명으로 압축 — 줄바꿈/해시태그 뭉치를 정리하고 길이를 자른다.
+
+    끝에 몰린 해시태그는 토큰을 뒤에서 떼어내 제거한다. 정규식(`(?:#\\S+\\s*)+$`)을 쓰면
+    \\S가 '#'까지 삼켜 분할 경우의 수가 지수로 늘어나 역추적 폭발이 일어난다 — 실측으로
+    '#a'가 24번 붙은 50자 입력이 3.3초, 토큰당 약 4배씩 증가했다. 캡션은 인스타 사용자가
+    자유롭게 쓰는 값(최대 2200자)이고 한국어 게시물에서 해시태그를 붙여 쓰는 표기가 흔해
+    악의가 없어도 리포트 생성이 멈출 수 있다. 스캔 전에 길이도 제한한다.
+    """
+    if not caption:
+        return "(설명 없음)"
+    text = " ".join(caption.split())[:CAPTION_INPUT_MAX]
+    tokens = text.split(" ")
+    while tokens and tokens[-1].startswith("#"):
+        tokens.pop()
+    text = " ".join(tokens).strip() or text
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _clean_handle(owner: Any) -> str:
+    """인스타 사용자명을 표시 가능한 형태로 제한 — 공백/개행이 섞이면 마크다운 줄 구조가 깨진다."""
+    return re.sub(r"[^A-Za-z0-9._]", "", str(owner or ""))[:30]
+
+
 def _sparkline(points: list[dict[str, Any]]) -> str:
     """주간 시계열을 유니코드 블록 문자로 압축한 미니 추이.
 
@@ -80,7 +127,12 @@ def _signal_summary(metrics: list[KeywordMetrics]) -> str:
     )
 
 
-def render_markdown(result: dict[str, Any]) -> str:
+def render_markdown(result: dict[str, Any], omit_rich: bool = False) -> str:
+    """리포트 마크다운.
+
+    omit_rich=True면 HTML 문서가 자체 섹션(릴스 카드·영상 갤러리)으로 다시 그리는 항목을
+    생략한다 — 그러지 않으면 웹 리포트에 같은 목록이 두 번 나온다.
+    """
     week = result["week"]
     metrics: list[KeywordMetrics] = result["metrics"]
     history: dict[str, list[dict[str, Any]]] = result.get("history") or {}
@@ -167,7 +219,9 @@ def render_markdown(result: dict[str, Any]) -> str:
         for s in result.get("shopping_keywords", [])[:8]:
             lines.append(f"- [제품] {s['keyword']}: WoW {_fmt_pct(s['velocity'])}")
 
-    tops = [t for t in (result.get("youtube_top_videos") or []) if _valid_youtube_id(t.get("video_id"))]
+    tops = [] if omit_rich else [
+        t for t in (result.get("youtube_top_videos") or []) if _valid_youtube_id(t.get("video_id"))
+    ]
     if tops:
         # 텍스트 리포트(터미널/Slack/이메일)에는 iframe 대신 안전한 링크 목록만.
         # URL은 검증된 id로 직접 조립한다. 제목은 평문(HTML 변환 시 이스케이프됨).
@@ -180,6 +234,21 @@ def render_markdown(result: dict[str, Any]) -> str:
             dv = t.get("dviews")
             extra = f", 최근 7일 +{dv:,}뷰" if dv is not None else ""
             lines.append(f"- #{t['rank']} {title} ({channel}{extra}) — {url}")
+
+    reels = [] if omit_rich else _visible_reels(result.get("instagram_reels"))
+    if reels:
+        lines.append("")
+        lines.append(f"**📸 인스타그램 인기 릴스 톱 {len(reels)}**")
+        for r in reels:
+            parts = []
+            if _clean_handle(r.get("owner")):
+                parts.append(f"@{_clean_handle(r['owner'])}")
+            if r.get("views") is not None:
+                parts.append(f"조회 {r['views']:,}")
+            if r.get("likes") is not None:
+                parts.append(f"좋아요 {r['likes']:,}")
+            meta = f" ({', '.join(parts)})" if parts else ""
+            lines.append(f"- #{r['rank']} {_caption_summary(r.get('caption'))}{meta} — {r['url']}")
 
     if result.get("trending"):
         lines.append("")
@@ -289,6 +358,12 @@ footer { margin-top: 2rem; color: #8889; font-size: 12px; }
   border-radius: 4px; background: #5b8def; color: #fff; text-align: center; font-size: 12px; }
 .video-card .vmeta { margin: 0; font-size: 12px; opacity: .85; }
 .video-card .vsub { margin: .15rem 0 0; font-size: 12px; opacity: .6; }
+.reels { list-style: none; padding: 0; margin: 1rem 0; }
+.reels .reel { display: flex; align-items: baseline; gap: .5rem; padding: .5rem 0;
+  border-bottom: 1px solid #8883; flex-wrap: wrap; }
+.reels .reel a { font-weight: 500; text-decoration: none; }
+.reels .reel a:hover { text-decoration: underline; }
+.reels .rmeta { font-size: 12px; opacity: .65; white-space: nowrap; }
 """
 
 
@@ -412,6 +487,42 @@ def _youtube_gallery_html(tops: list[dict[str, Any]] | None) -> str:
     )
 
 
+def _reels_html(reels: list[dict[str, Any]] | None) -> str:
+    """인기 릴스 목록 (HTML 문서 전용).
+
+    인스타 임베드(oEmbed)는 App Review가 필요하고 썸네일 핫링크는 만료 URL이라,
+    링크 + 설명 카드로만 구성한다 — 약관상 안전하고 깨지지 않는다.
+    URL은 instagram.com 게시물 형태만 통과시키고(_safe_ig_url), 캡션은 요소 본문에만 넣어
+    이스케이프한다(속성에 신뢰 불가 문자열을 두지 않는다).
+    """
+    items = _visible_reels(reels)
+    if not items:
+        return ""
+    cards = []
+    for r in items:
+        bits = []
+        if _clean_handle(r.get("owner")):
+            bits.append(f"@{_esc(_clean_handle(r['owner']))}")
+        if r.get("views") is not None:
+            bits.append(f"▶ {r['views']:,}")
+        if r.get("likes") is not None:
+            bits.append(f"♥ {r['likes']:,}")
+        if r.get("comments") is not None:
+            bits.append(f"💬 {r['comments']:,}")
+        cards.append(
+            '<li class="reel">'
+            f'<span class="rank">#{int(r["rank"])}</span>'
+            f'<a href="{r["url"]}" target="_blank" rel="noopener noreferrer nofollow">'
+            f'{_esc(_caption_summary(r.get("caption")))}</a>'
+            f'<span class="rmeta">{" · ".join(bits)}</span>'
+            "</li>"
+        )
+    return (
+        f"<h3>📸 인스타그램 인기 릴스 톱 {len(cards)}</h3>"
+        '<ol class="reels">' + "".join(cards) + "</ol>"
+    )
+
+
 def html_document(
     markdown_text: str, title: str, generated_at: str = "", result: dict[str, Any] | None = None
 ) -> str:
@@ -422,6 +533,7 @@ def html_document(
     """
     body = markdown_to_html(markdown_text)
     gallery = _youtube_gallery_html(result.get("youtube_top_videos")) if result else ""
+    reels = _reels_html(result.get("instagram_reels")) if result else ""
     charts = _charts_html(result) if result else ""
     foot = f"<footer>생성 시각: {generated_at}</footer>" if generated_at else ""
     return (
@@ -429,7 +541,7 @@ def html_document(
         '<html lang="ko"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{title}</title>\n<style>{_PAGE_STYLE}</style>\n"
-        f"</head><body>\n{body}\n{gallery}\n{charts}\n{foot}\n</body></html>\n"
+        f"</head><body>\n{body}\n{reels}\n{gallery}\n{charts}\n{foot}\n</body></html>\n"
     )
 
 
