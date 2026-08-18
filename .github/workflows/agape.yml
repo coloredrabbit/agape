@@ -13,8 +13,10 @@ name: agape trend pipeline
 
 on:
   schedule:
-    - cron: "0 22 * * *"     # 매일 07:00 KST — collect (데이터 누적)
-    - cron: "30 22 * * 0"    # 매주 월 07:30 KST — discover + report + Pages
+    # Apify 인스타 task가 매일 09:00 KST에 돌므로(사용자가 Apify 콘솔 스케줄로 설정),
+    # 그 결과를 같은 날 반영하려고 수집을 09:30 KST로 맞춘다.
+    - cron: "30 0 * * *"     # 매일 09:30 KST — collect + 시트 upsert
+    - cron: "0 1 * * 1"      # 매주 월 10:00 KST — discover + report + Pages
   workflow_dispatch:          # 수동 실행 버튼(URL로 트리거 가능)
     inputs:
       full:
@@ -38,6 +40,12 @@ env:
   YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
   PINTEREST_APP_ID: ${{ secrets.PINTEREST_APP_ID }}
   PINTEREST_APP_SECRET: ${{ secrets.PINTEREST_APP_SECRET }}
+  # Apify — 마지막 성공 run의 데이터만 읽는다(크레딧 미소모). run 트리거는 하지 않음.
+  APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+  APIFY_INSTAGRAM_TASK_ID: ${{ secrets.APIFY_INSTAGRAM_TASK_ID }}
+  GSHEET_WEBHOOK_URL: ${{ secrets.GSHEET_WEBHOOK_URL }}
+  GSHEET_WEBHOOK_SECRET: ${{ secrets.GSHEET_WEBHOOK_SECRET }}
+  APIFY_ALERT_EMAIL: ${{ secrets.APIFY_ALERT_EMAIL }}
   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
   SMTP_HOST: ${{ secrets.SMTP_HOST }}
   SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -61,7 +69,7 @@ jobs:
           FULL: ${{ inputs.full }}
         run: |
           WEEKLY=false
-          [ "$SCHEDULE" = "30 22 * * 0" ] && WEEKLY=true
+          [ "$SCHEDULE" = "0 1 * * 1" ] && WEEKLY=true
           { [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" = "true" ]; } && WEEKLY=true
           echo "weekly=$WEEKLY" >> "$GITHUB_OUTPUT"
           echo "실행 모드: weekly=$WEEKLY"
@@ -78,6 +86,19 @@ jobs:
 
       - name: collect (매일 — 네이버/유튜브/핀터레스트)
         run: uv run agape collect
+
+      # 계정 API라 크레딧을 쓰지 않는다. 임계 초과 시에만(주기·단계당 1회) 메일이 나간다.
+      - name: Apify 크레딧 사용률 점검 (실패는 경고)
+        if: env.APIFY_TOKEN != ''
+        run: uv run agape apify-usage || echo "::warning::Apify 사용률 점검 실패"
+
+      - name: Google Sheets 적재 — key 기준 upsert (URL 설정된 경우만 · 실패는 경고)
+        if: env.GSHEET_WEBHOOK_URL != ''
+        run: uv run agape export-sheet || echo "::warning::시트 적재 실패 (웹앱 URL·시크릿 확인)"
+
+      - name: 시트 데이터 표시 (Actions 로그에서 확인)
+        if: env.GSHEET_WEBHOOK_URL != ''
+        run: uv run agape sheet-show || echo "::warning::시트 조회 실패"
 
       - name: channels.yaml 생성 (레포 변수에서)
         if: steps.mode.outputs.weekly == 'true'
@@ -102,11 +123,17 @@ jobs:
             echo "channels.yaml 없음 — 전송 생략 (레포 변수 CHANNELS_YAML 설정 시 활성화)"
           fi
 
+      # always(): 리포트/전송이 실패해도 그 실행에서 모은 데이터와 상태(시트 전송 기록 등)는
+      # 남겨야 한다. 안 그러면 다음 실행이 같은 것을 다시 보내거나 수집분이 통째로 버려진다.
       - name: data/ 커밋백 (상태 영속화)
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f data
+          # 인스타 원본은 커밋하지 않는다 — 제3자 계정명·캡션(개인정보)이라 공개 레포에
+          # 재게시하는 셈이 된다. Apify는 매 실행이 전체 스냅샷이라 이력이 없어도 리포트는
+          # 정상 동작하고(같은 잡 안에서 collect→report), 전송 상태는 data/state/에 남는다.
+          git add -f data ':(exclude)data/raw/instagram_posts'
           if git diff --cached --quiet; then
             echo "데이터 변경 없음"
           else
