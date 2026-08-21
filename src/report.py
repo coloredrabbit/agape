@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import smtplib
+from datetime import timedelta
 from email.message import EmailMessage
 from typing import Any
 
@@ -525,6 +526,16 @@ a { color: var(--blue); }
   padding: 7px 14px; font-size: 12px; color: var(--ink-2); box-shadow: var(--shadow);
   white-space: nowrap; }
 .lead { color: var(--ink-2); font-size: 13px; margin: 0 0 18px; }
+/* 데이터 신선도 스트립 — "분석 주"와 "수집 최신일"이 다를 수 있음을 화면에서 바로 보이게. */
+.fresh { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+.fresh-item { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 11px; font-size: 11.5px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; }
+.fresh-item b { color: var(--ink); font-weight: 600; }
+/* STALE_DAYS 이상 뒤처진 소스만 강조한다(발행 주기 차이로는 칠하지 않는다). */
+.fresh-item.stale { border-color: #f3d9a8; background: var(--amber-50);
+  color: var(--amber-ink); font-weight: 600; }
+.fresh-note { font-size: 11px; color: var(--muted); align-self: center; }
 
 /* ── KPI 카드 ─────────────────────────────────────────── */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
@@ -1007,6 +1018,57 @@ def _reels_html(reels: list[dict[str, Any]] | None, sid: str = "reels") -> str:
     )
 
 
+_SOURCE_LABELS = {
+    "naver_search": "네이버 검색", "naver_shopping": "네이버 쇼핑",
+    "youtube_stats": "유튜브", "youtube_trending": "유튜브 인기",
+    "pinterest_metrics": "핀터레스트", "pinterest_top": "핀터레스트 톱",
+    "pinterest_official": "핀터레스트 공식", "instagram_posts": "인스타그램",
+}
+
+# 소스마다 발행 주기가 다르다 — 핀터레스트 트렌즈는 주간 발행이라 새 데이터가 없으면
+# 수집기가 아무것도 쓰지 않는다(정상). 그래서 "가장 최신 소스보다 하루라도 뒤처지면 경고"로
+# 칠하면 정상 상태를 이상으로 오인시킨다 — 이번 혼란이 바로 그런 잘못된 신호에서 나왔다.
+# 한 주치를 넘겨 뒤처질 때만 실제 정체로 본다.
+STALE_DAYS = 8
+
+
+def _freshness_html(result: dict[str, Any]) -> str:
+    """소스별 마지막 수집일 + 분석 기준 주 안내.
+
+    리포트는 "직전 완결 주"만 집계하므로(진행 중인 주는 부분 데이터) 매일 수집이 정상이어도
+    분석 주는 월요일에만 넘어간다. 이 둘을 구분해 보여주지 않으면 며칠째 같은 날짜로 보여
+    자동화가 멈춘 것처럼 읽힌다 — 실제로 그런 오해가 있었다.
+    """
+    fresh = result.get("freshness") or {}
+    week = result.get("week")
+    if not fresh and not week:
+        return ""
+    chips = []
+    if week is not None:
+        nxt = week + timedelta(days=14)
+        chips.append(
+            f'<span class="fresh-item"><b>분석 기준</b> {week.isoformat()} 주 '
+            f'(다음 주 전환 {nxt.isoformat()})</span>'
+        )
+    newest = max((d for d in fresh.values() if d), default=None)
+    if newest is not None:
+        chips.append(f'<span class="fresh-item"><b>수집 최신</b> {newest.isoformat()}</span>')
+    for src, d in sorted(fresh.items()):
+        if src == "instagram_posts":
+            continue  # 원본은 커밋하지 않으므로 CI에서 항상 비어 있다 — 오해를 부른다
+        label = _SOURCE_LABELS.get(src, src)
+        behind = (newest - d).days if (d and newest) else None
+        stale = " stale" if (d is None or (behind is not None and behind >= STALE_DAYS)) else ""
+        chips.append(
+            f'<span class="fresh-item{stale}">{_esc(label)} {d.isoformat() if d else "수집 없음"}</span>'
+        )
+    chips.append(
+        '<span class="fresh-note">소스별 발행 주기가 달라 날짜가 다를 수 있습니다 '
+        f'(핀터레스트는 주간 발행). {STALE_DAYS}일 이상 뒤처지면 강조됩니다.</span>'
+    )
+    return '<div class="fresh">' + "".join(chips) + "</div>"
+
+
 def _nav_html(items: list[tuple[str, str]]) -> str:
     if not items:
         return ""
@@ -1041,6 +1103,7 @@ def html_document(
         ]
     nav = nav + [(sid, label) for sid, label, html in extras if html]
     kpis = _kpi_cards(result, sections) if result else ""
+    fresh = _freshness_html(result) if result else ""
     head_title = doc_title or title
     stamp = f"<p>생성 시각: {_esc(generated_at)}</p>" if generated_at else ""
     foot = f"<footer>{notes_html}{stamp}</footer>" if (notes_html or stamp) else ""
@@ -1064,7 +1127,7 @@ def html_document(
         f'<div class="top"><div><h1>{_esc(head_title)}</h1>'
         f'<p class="sub">네이버 · 유튜브 · 핀터레스트 · 인스타그램 통합 신호</p></div>'
         f"{chip}</div>\n"
-        f"{lead_html}\n{kpis}\n{cards}\n"
+        f"{lead_html}\n{fresh}\n{kpis}\n{cards}\n"
         + "\n".join(html for _, _, html in extras if html)
         + f"\n{foot}\n</div></main>\n</div>\n"
         f"<script>{_PAGE_SCRIPT}</script>\n"

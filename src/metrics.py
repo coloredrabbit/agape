@@ -462,6 +462,29 @@ def top_instagram_reels(
     ]
 
 
+def source_freshness() -> dict[str, date | None]:
+    """소스별 마지막 수집일 — raw 파일명이 곧 실행일이므로 파일 목록만 보면 된다.
+
+    리포트가 "직전 완결 주"만 집계하기 때문에(last_complete_week), 매일 수집이 잘 돌아도
+    화면의 분석 주는 월요일에만 넘어간다. 그 둘을 구분해 보여주지 않으면 "며칠째 같은
+    날짜네 — 자동화가 멈췄나?"로 읽힌다. 수집 최신일을 따로 노출해 그 오해를 막는다.
+    """
+    out: dict[str, date | None] = {}
+    for d in sorted(storage.RAW_DIR.glob("*")):
+        if not d.is_dir():
+            continue
+        dates = []
+        for f in d.glob("*.jsonl"):
+            if f.stat().st_size == 0:
+                continue
+            try:
+                dates.append(date.fromisoformat(f.stem))
+            except ValueError:
+                continue  # 날짜 형식이 아닌 파일명은 무시
+        out[d.name] = max(dates) if dates else None
+    return out
+
+
 def compute(
     keyword_names: list[str],
     week: date | None = None,
@@ -498,6 +521,7 @@ def compute(
 
     return {
         "week": week,
+        "freshness": source_freshness(),
         "metrics": metrics,
         "history": _naver_history(con, week, filters_tag),
         "shopping": shopping_category_summary(con, week, filters_tag),

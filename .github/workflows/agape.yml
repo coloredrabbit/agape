@@ -20,8 +20,10 @@ on:
   schedule:
     # 웹훅이 안 왔을 때를 위한 안전망. 웹훅이 정상 동작하면 같은 날 두 번 도는데, 저장은
     # 병합·읽기 시 dedupe되고 시트는 key 기준 upsert라 중복이 쌓이지 않는다(무해한 중복).
-    - cron: "30 0 * * *"     # 매일 09:30 KST — collect + 시트 upsert
-    - cron: "0 1 * * 1"      # 매주 월 10:00 KST — discover + report + Pages
+    # GitHub의 예약 실행은 best-effort로 최대 1~2시간 늦게 돈다(실측 ~11:00 KST) —
+    # Apify task(09:00 KST) 뒤라는 순서만 지켜지면 되므로 문제되지 않는다.
+    - cron: "30 0 * * *"     # 매일 09:30 KST — collect + 시트 upsert + Pages 갱신
+    - cron: "0 1 * * 1"      # 매주 월 10:00 KST — discover + report 전송(채널)
   workflow_dispatch:          # 수동 실행 버튼(URL로 트리거 가능)
     inputs:
       full:
@@ -120,8 +122,13 @@ jobs:
             echo "channels.yaml 생성됨"
           fi
 
-      - name: report → HTML (weekly)
-        if: steps.mode.outputs.weekly == 'true'
+      # 매일 만든다. 수집은 매일 도는데 페이지가 주 1회만 갱신되면 며칠째 같은 날짜로
+      # 보여 자동화가 멈춘 것처럼 읽힌다(실제로 그런 오해가 있었다). HTML 생성과 Pages
+      # 배포는 외부 쿼터를 쓰지 않으므로 매일 해도 비용이 없다 — 쿼터를 쓰는 discover와
+      # 수신자에게 실제로 발송되는 report --send만 주간으로 남긴다.
+      # 참고: 네이버 집계는 "직전 완결 주"라서 분석 주 자체는 월요일에만 넘어가고,
+      # 매일 바뀌는 것은 유튜브 급상승/인기 섹션과 신선도 표시다.
+      - name: report → HTML (매일 — 페이지를 항상 최신 상태로)
         run: uv run agape report --quiet --html public/index.html
 
       - name: report 전송 (weekly, 채널 있을 때만 · 실패는 경고)
@@ -152,8 +159,8 @@ jobs:
             git push
           fi
 
-      - name: Pages 아티팩트 업로드 (weekly)
-        if: steps.mode.outputs.weekly == 'true' && vars.PUBLISH_PAGES != 'false'
+      - name: Pages 아티팩트 업로드 (매일)
+        if: vars.PUBLISH_PAGES != 'false'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
@@ -161,7 +168,7 @@ jobs:
   # 리포트를 GitHub Pages URL로 게시. PUBLISH_PAGES=false 로 끌 수 있다.
   deploy-pages:
     needs: run
-    if: needs.run.outputs.weekly == 'true' && vars.PUBLISH_PAGES != 'false'
+    if: vars.PUBLISH_PAGES != 'false'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
